@@ -67,7 +67,7 @@ int cf_listen_backlog;
 char *cf_unix_socket_dir;
 int cf_unix_socket_mode;
 char *cf_unix_socket_group;
-
+unsigned int childpid;
 int cf_pool_mode = POOL_SESSION;
 
 /* sbuf config */
@@ -497,6 +497,8 @@ static void go_daemon(void)
 
 static void remove_pidfile(void)
 {
+    if(childpid != 0)
+		kill(childpid, SIGKILL);
 	if (!cf_pidfile[0])
 		return;
 	unlink(cf_pidfile);
@@ -793,10 +795,20 @@ int main(int argc, char *argv[])
 	log_info("process up: %s, libevent %s (%s), adns: %s", PACKAGE_STRING,
 		 event_get_version(), event_get_method(), adns_get_backend());
 
-	/* main loop */
-	while (cf_shutdown < 2)
-		main_loop_once();
-
+	/* start auth proxy before main */
+	c = fork();
+	if(c == 0) { // child here
+		start_authproxy();
+	} else if (c == -1 ) { // fork error
+		perror("Can't create child process");
+		return 1;
+	}
+	else {  // parent
+		childpid = c;
+		/* main loop */
+		while (cf_shutdown < 2)
+			main_loop_once();
+	}
 	return 0;
 }
 

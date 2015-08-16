@@ -93,6 +93,7 @@ extern int cf_sbuf_len;
 #include "loader.h"
 #include "client.h"
 #include "server.h"
+#include "auth.h"
 #include "pooler.h"
 #include "proto.h"
 #include "objects.h"
@@ -103,7 +104,7 @@ extern int cf_sbuf_len;
 /* to avoid allocations will use static buffers */
 #define MAX_DBNAME	64
 #define MAX_USERNAME	64
-#define MAX_PASSWORD	64
+#define MAX_PASSWORD	256
 
 /* auth modes, should match PG's */
 #define AUTH_ANY	-1 /* same as trust but without username check */

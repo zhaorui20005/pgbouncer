@@ -7,11 +7,14 @@
 /configure
 /install-sh
 /pgbouncer
+/autoproxy
 /.objs
 /tags
-
+TAGS
 *.html
 *.xml
 *.exe
 *.gz
 *.swp
+*~\#*
+*~

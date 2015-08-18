@@ -16,44 +16,48 @@
 ssize_t             /* Write "n" bytes to a descriptor  */
 writen(int fd, const void *ptr, size_t n)
 {
-	size_t		nleft;
-	ssize_t		nwritten;
-	const char* lptr = ptr;
-	nleft = n;
-	while (nleft > 0) {
-		if ((nwritten = write(fd, lptr, nleft)) < 0) {
-			if (nleft == n)
-				return(-1); /* error, return -1 */
-			else
-				break;      /* error, return amount written so far */
-		} else if (nwritten == 0) {
-			break;
-		}
-		nleft -= nwritten;
-		lptr   += nwritten;
-	}
-	return(n - nleft);      /* return >= 0 */
+    size_t		nleft;
+    ssize_t		nwritten;
+    const char* lptr = ptr;
+    nleft = n;
+    while (nleft > 0) {
+        if ((nwritten = write(fd, lptr, nleft)) < 0) {
+            if (nleft == n)
+                return(-1); /* error, return -1 */
+            else {
+                perror("Blocking write failure");
+                break;      /* error, return amount written so far */
+            }
+        } else if (nwritten == 0) {
+            break;
+        }
+        nleft -= nwritten;
+        lptr   += nwritten;
+    }
+    return(n - nleft);      /* return >= 0 */
 }
 
 ssize_t             /* Read "n" bytes from a descriptor  */
 readn(int fd, void *ptr, size_t n) {
-	size_t          nleft;
-	ssize_t         nread;
-	char* lptr = ptr;
-	nleft = n;
-	while (nleft > 0) {
-		if ((nread = read(fd, lptr, nleft)) < 0) {
-			if (nleft == n)
-				return(-1); /* error, return -1 */
-			else
-				break;      /* error, return amount read so far */
-		} else if (nread == 0) {
-			break;          /* EOF */
-		}
-		nleft -= nread;
-		lptr   += nread;
-	}
-	return(n - nleft);      /* return >= 0 */
+    size_t          nleft;
+    ssize_t         nread;
+    char* lptr = ptr;
+    nleft = n;
+    while (nleft > 0) {
+        if ((nread = read(fd, lptr, nleft)) < 0) {
+            if (nleft == n)
+                return(-1); /* error, return -1 */
+            else {
+                perror("Blocking read failure");
+                break;      /* error, return amount read so far */
+            }
+        } else if (nread == 0) {
+            break;          /* EOF */
+        }
+        nleft -= nread;
+        lptr   += nread;
+    }
+    return(n - nleft);      /* return >= 0 */
 }
 
 void
@@ -68,5 +72,5 @@ sleep_us(unsigned int nusecs)
 
 void sleep_ms(unsigned int msecs)
 {
-	sleep_us(1000 * msecs);
+    sleep_us(1000 * msecs);
 }

@@ -90,10 +90,10 @@ static inline signed int check_error(int return_value)
     if ( return_value < 0 )
     {
 # ifdef VERBOSE
-	errbuf = strerror(errno);
-	debug_write(errbuf);
+        errbuf = strerror(errno);
+        debug_write(errbuf);
 # endif
-	return -1;
+        return -1;
     }
 
     return 0;
@@ -113,10 +113,10 @@ int create_unix_stream_socket(const char* path, int flags)
     int sfd;
 
     if ( path == NULL )
-	return -1;
+        return -1;
 
     if ( -1 == check_error(sfd = socket(AF_UNIX,SOCK_STREAM|flags,0)) )
-	return -1;
+        return -1;
 
     memset(&saddr,0,sizeof(struct sockaddr_un));
 
@@ -153,12 +153,12 @@ int create_unix_dgram_socket(const char* bind_path, int flags)
 {
     int sfd, retval;
     struct sockaddr_un saddr;
-    
+
     if ( -1 == check_error(sfd = socket(AF_UNIX,SOCK_DGRAM|flags,0)) )
         return -1;
-    
+
     memset(&saddr,0,sizeof(struct sockaddr_un));
-    
+
     if ( bind_path != NULL )
     {
         if ( (retval = unlink(bind_path)) == -1 && errno != ENOENT ) // If there's another error than "doesn't exist"
@@ -169,7 +169,7 @@ int create_unix_dgram_socket(const char* bind_path, int flags)
         }
 
         if ( strlen(bind_path) > (sizeof(saddr.sun_path)-1) )
-	    {
+        {
 # ifdef VERBOSE
             debug_write("create_unix_dgram_socket: UNIX socket path too long\n");
 # endif
@@ -179,7 +179,7 @@ int create_unix_dgram_socket(const char* bind_path, int flags)
 
         saddr.sun_family = AF_UNIX;
         strncpy(saddr.sun_path,bind_path,sizeof(saddr.sun_path)-1);
-        
+
         if (bind(sfd,(struct sockaddr*)&saddr,sizeof(saddr.sun_family) + strlen(saddr.sun_path)) == -1) {
             close(sfd);
             return -1;
@@ -207,18 +207,18 @@ int connect_unix_dgram_socket(int sfd, const char* path)
     struct sockaddr deconnect;
 
     if ( sfd < 0 )
-	return -1;
+        return -1;
 
     if ( path == NULL )
     {
-	memset(&deconnect,0,sizeof(struct sockaddr));
+        memset(&deconnect,0,sizeof(struct sockaddr));
 
-	deconnect.sa_family = AF_UNSPEC;
+        deconnect.sa_family = AF_UNSPEC;
 
-	if ( check_error(connect(sfd,&deconnect,sizeof(struct sockaddr))) )
-	    return -1;
+        if ( check_error(connect(sfd,&deconnect,sizeof(struct sockaddr))) )
+            return -1;
 
-	return 0;
+        return 0;
     }
 
     memset(&new_addr,0,sizeof(struct sockaddr_un));
@@ -228,9 +228,9 @@ int connect_unix_dgram_socket(int sfd, const char* path)
     if ( strlen(path) > sizeof(new_addr.sun_path)-1 )
     {
 # ifdef VERBOSE
-	debug_write("connect_unix_dgram_socket: Path too long\n");
+        debug_write("connect_unix_dgram_socket: Path too long\n");
 # endif
-	return -1;
+        return -1;
     }
 
     strncpy(new_addr.sun_path,path,sizeof(new_addr.sun_path)-1);
@@ -254,10 +254,10 @@ int connect_unix_dgram_socket(int sfd, const char* path)
 int destroy_unix_socket(int sfd)
 {
     if ( sfd < 0 )
-	return -1;
+        return -1;
 
     if ( -1 == check_error(close(sfd)))
-	return -1;
+        return -1;
 
     return 0;
 }
@@ -278,22 +278,22 @@ int destroy_unix_socket(int sfd)
 int shutdown_unix_stream_socket(int sfd, int method)
 {
     if ( sfd < 0 )
-	return -1;
+        return -1;
 
     if ( (method != LIBSOCKET_READ) && (method != LIBSOCKET_WRITE) && (method != (LIBSOCKET_READ|LIBSOCKET_WRITE)) )
-	return -1;
+        return -1;
 
     if ( method & LIBSOCKET_READ ) // READ is set (0001 && 0001 => 0001)
     {
-	if ( -1 == check_error(shutdown(sfd,SHUT_RD)))
-	    return -1;
+        if ( -1 == check_error(shutdown(sfd,SHUT_RD)))
+            return -1;
 
     }
 
     if ( method & LIBSOCKET_WRITE ) // WRITE is set (0010 && 0010 => 0010)
     {
-	if ( -1 == check_error(shutdown(sfd,SHUT_WR)))
-	    return -1;
+        if ( -1 == check_error(shutdown(sfd,SHUT_WR)))
+            return -1;
     }
 
     return 0;
@@ -319,26 +319,26 @@ int create_unix_server_socket(const char* path, int socktype, int flags)
     int sfd, type, retval;
 
     if ( path == NULL )
-	return -1;
+        return -1;
 
     if ( strlen(path) > (sizeof(saddr.sun_path)-1) )
     {
 # ifdef VERBOSE
-	debug_write("create_unix_server_socket: Path too long\n");
+        debug_write("create_unix_server_socket: Path too long\n");
 # endif
-	return -1;
+        return -1;
     }
 
     switch ( socktype )
     {
-	case LIBSOCKET_STREAM:
-	    type = SOCK_STREAM;
-	    break;
-	case LIBSOCKET_DGRAM:
-	    type = SOCK_DGRAM;
-	    break;
-	default:
-	    return -1;
+    case LIBSOCKET_STREAM:
+        type = SOCK_STREAM;
+        break;
+    case LIBSOCKET_DGRAM:
+        type = SOCK_DGRAM;
+        break;
+    default:
+        return -1;
     }
 
     if ( -1 == check_error(sfd = socket(AF_UNIX,type|flags,0)) )
@@ -357,7 +357,7 @@ int create_unix_server_socket(const char* path, int socktype, int flags)
 
     strncpy(saddr.sun_path,path,sizeof(saddr.sun_path)-1);
 
-    if ( -1 == check_error(bind(sfd,(struct sockaddr*)&saddr,sizeof(saddr.sun_family) + strlen(saddr.sun_path))) ) 
+    if ( -1 == check_error(bind(sfd,(struct sockaddr*)&saddr,sizeof(saddr.sun_family) + strlen(saddr.sun_path))) )
     {
         close(sfd);
         return -1;
@@ -388,10 +388,10 @@ int accept_unix_stream_socket(int sfd, int flags)
     int cfd;
 
     if ( sfd < 0 )
-	return -1;
+        return -1;
 
     if ( -1 == check_error(cfd = accept(sfd,0,0)) )
-		return -1;
+        return -1;
 
     return cfd;
 }
@@ -419,10 +419,10 @@ ssize_t recvfrom_unix_dgram_socket(int sfd, void* buf, size_t size, char* from, 
     memset(from,0,from_size);
 
     if ( -1 == check_error(bytes = recvfrom(sfd,buf,size,recvfrom_flags,(struct sockaddr*)&saddr,&socksize)) )
-	return -1;
+        return -1;
 
     if ( from != NULL && from_size > 0 )
-	strncpy(from,saddr.sun_path,from_size);
+        strncpy(from,saddr.sun_path,from_size);
 
     return bytes;
 }
@@ -447,9 +447,9 @@ ssize_t sendto_unix_dgram_socket(int sfd, const void* buf, size_t size, const ch
     if ( strlen(path) > sizeof(saddr.sun_path)-1 )
     {
 # ifdef VERBOSE
-	debug_write("sendto_unix_dgram_socket: UNIX destination socket path too long\n");
+        debug_write("sendto_unix_dgram_socket: UNIX destination socket path too long\n");
 # endif
-	return -1;
+        return -1;
     }
 
     memset(&saddr,0,sizeof(struct sockaddr_un));
@@ -458,7 +458,7 @@ ssize_t sendto_unix_dgram_socket(int sfd, const void* buf, size_t size, const ch
     strncpy(saddr.sun_path,path,sizeof(saddr.sun_path)-1);
 
     if ( -1 == check_error(bytes = sendto(sfd,buf,size,sendto_flags,(struct sockaddr*)&saddr,sizeof(struct sockaddr_un))) )
-	return -1;
+        return -1;
 
     return bytes;
 }

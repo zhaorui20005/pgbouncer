@@ -1,5 +1,5 @@
 /*-------------------------------------------------------------------------
- * Generic types and functions for authentication and communication 
+ * Generic types and functions for authentication and communication
  *
  * Copyright (c) 2015 Pivotal Inc. All Rights Reserved
  *
@@ -9,14 +9,14 @@
 #define __PACKAT__H__
 
 typedef enum {
-	UNKNOWN = 0 ,
-	RESULT_OK ,
-	RESULT_FAIL,
+    UNKNOWN = 0 ,
+    RESULT_OK ,
+    RESULT_FAIL,
 
-	AUTH_LDAP,
-	AUTH_FAKE,
-	AUTH_GSSAPI,
-	AUTH_PG,
+    AUTH_LDAP,
+    AUTH_FAKE,
+    AUTH_GSSAPI,
+    AUTH_PG,
 } PacketType;
 
 #define BUFSIZE  1024

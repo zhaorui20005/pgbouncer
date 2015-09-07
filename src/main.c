@@ -97,6 +97,7 @@ int cf_max_db_connections;
 int cf_max_user_connections;
 
 char *cf_server_reset_query;
+int cf_server_reset_query_always;
 char *cf_server_check_query;
 usec_t cf_server_check_delay;
 int cf_server_round_robin;
@@ -199,6 +200,7 @@ CF_ABS("user", CF_STR, cf_username, CF_NO_RELOAD, NULL),
 CF_ABS("autodb_idle_timeout", CF_TIME_USEC, cf_autodb_idle_timeout, 0, "3600"),
 
 CF_ABS("server_reset_query", CF_STR, cf_server_reset_query, 0, "DISCARD ALL"),
+CF_ABS("server_reset_query_always", CF_INT, cf_server_reset_query_always, 0, "1"),
 CF_ABS("server_check_query", CF_STR, cf_server_check_query, 0, "select 1"),
 CF_ABS("server_check_delay", CF_TIME_USEC, cf_server_check_delay, 0, "30"),
 CF_ABS("query_timeout", CF_TIME_USEC, cf_query_timeout, 0, "0"),
@@ -234,7 +236,7 @@ CF_ABS("stats_period", CF_INT, cf_stats_period, 0, "60"),
 CF_ABS("log_connections", CF_INT, cf_log_connections, 0, "1"),
 CF_ABS("log_disconnections", CF_INT, cf_log_disconnections, 0, "1"),
 CF_ABS("log_pooler_errors", CF_INT, cf_log_pooler_errors, 0, "1"),
-CF_ABS("application_name_add_host", CF_INT, cf_application_name_add_host, 0, "1"),
+CF_ABS("application_name_add_host", CF_INT, cf_application_name_add_host, 0, "0"),
 {NULL}
 };
 
@@ -785,10 +787,11 @@ int main(int argc, char *argv[])
 	janitor_setup();
 	stats_setup();
 
-	if (did_takeover)
+	if (did_takeover) {
 		takeover_finish();
-	else
+	} else {
 		pooler_setup();
+	}
 
 	write_pidfile();
 

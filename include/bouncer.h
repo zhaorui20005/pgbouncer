@@ -125,11 +125,6 @@ extern int cf_sbuf_len;
 #define POOL_STMT	2
 #define POOL_INHERIT	3
 
-/* old style V2 header: len:4b code:4b */
-#define OLD_HEADER_LEN	8
-/* new style V3 packet header len - type:1b, len:4b */ 
-#define NEW_HEADER_LEN	5
-
 #define BACKENDKEY_LEN	8
 
 /* buffer size for startup noise */
@@ -226,12 +221,15 @@ struct PgPool {
 	unsigned welcome_msg_ready:1;
 };
 
-#define pool_server_count(pool) ( \
+#define pool_connected_server_count(pool) ( \
 		statlist_count(&(pool)->active_server_list) + \
 		statlist_count(&(pool)->idle_server_list) + \
-		statlist_count(&(pool)->new_server_list) + \
 		statlist_count(&(pool)->tested_server_list) + \
 		statlist_count(&(pool)->used_server_list))
+
+#define pool_server_count(pool) ( \
+		pool_connected_server_count(pool) + \
+		statlist_count(&(pool)->new_server_list))
 
 #define pool_client_count(pool) ( \
 		statlist_count(&(pool)->active_client_list) + \
@@ -388,6 +386,7 @@ extern usec_t cf_suspend_timeout;
 extern usec_t cf_server_lifetime;
 extern usec_t cf_server_idle_timeout;
 extern char * cf_server_reset_query;
+extern int cf_server_reset_query_always;
 extern char * cf_server_check_query;
 extern usec_t cf_server_check_delay;
 extern usec_t cf_server_connect_timeout;

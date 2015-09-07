@@ -1,4 +1,30 @@
-2015-xx-xx  -  PgBouncer 1.6  -  ""
+2015-09-03  -  PgBouncer 1.6.1  -  "Studio Audience Approves"
+
+  = Features =
+
+    * New setting - server_reset_query_always.  When set,
+      disables server_reset_query use on non-session pools.
+      PgBouncer introduces per-pool pool_mode, but session-pooling
+      and transaction-pooling should not use same reset query.
+      In fact, transaction-pooling should not use any reset query.
+
+      It is set in 1.6.x, but will be disabled in 1.7.
+
+  = Fixes =
+
+    * [SECURITY]  Remove invalid assignment of `auth_user`. (#69)
+      When `auth_user` is set and client asks non-existing username,
+      client will log in as `auth_user`.  Not good.
+
+    * Skip NoticeResponce in handle_auth_response.  Otherwise verbose
+      log levels on server cause login failures.
+
+    * console: Fill `auth_user` when auth_type=any.  Otherwise
+      logging can crash (#67).
+
+    * Various portability fixes (OpenBSD, Solaris, OSX).
+
+2015-08-01  -  PgBouncer 1.6  -  "Zombies of the future"
 
   = Features =
 
@@ -42,7 +68,7 @@
 
     * Add the client host IP address and port to application_name.
       This is enabled by a config parameter application_name_add_host
-      which defaults to 'on'.
+      which defaults to 'off'.
       (Andrew Dunstan)
 
     * Config files have '%include FILENAME' directive to allow configuration
@@ -66,6 +92,9 @@
 
     * Allow comments (with ';') in auth files.
       (Guillaume Aubert)
+
+    * Fix spelling mistakes in log messages and comments.
+      (Dmitriy Olshevskiy)
 
   = Fixes =
 
@@ -91,6 +120,19 @@
 
     * Add newline at the end of the PID file
       (Peter Eisentraut)
+
+    * Don't allow new server connections when PAUSE <db> was issued.
+      (Petr Jelinek)
+
+    * Fix 'bad packet' during login when header is delayed.
+      (Michał Trojnara, Marko Kreen)
+
+    * Fix errors detected by Coverty.
+      (Euler Taveira)
+
+    * Disable server_idle_timeout when server count gets below min_pool (#60)
+      (Marko Kreen)
+
 
 2012-11-28  -  PgBouncer 1.5.4  -  "No Leaks, Potty-Training Successful"
 

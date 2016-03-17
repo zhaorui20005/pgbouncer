@@ -1,3 +1,3 @@
 [submodule "lib"]
 	path = lib
-	url = ssh://git@stash.eng.pivotal.io:2222/gpdb/libusual.git
+	url = git@github.com:greenplum-db/libusual.git

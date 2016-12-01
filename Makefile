@@ -50,7 +50,7 @@ pgbouncer_SOURCES = \
 COMMON_CFLAGS = -g  -Wall -DLDAP_DEPRECATED
 pgbouncer_CPPFLAGS = -Iap -Iinclude $(CARES_CFLAGS) $(COMMON_CFLAGS)
 pgbouncer_LDFLAGS = -L../deps/lib -Wl,-rpath=\$$ORIGIN/../lib
-STATICLIB = -lssl -lldap -llber -lssl -lcrypto
+STATICLIB = -lssl -lgsasl -lldap -llber -lssl -lcrypto
 
 pgbouncer_LIBS = -Wl,-Bstatic $(STATICLIB) -Wl,-Bdynamic -ldl
 

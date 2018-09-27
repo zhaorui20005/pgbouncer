@@ -29,7 +29,7 @@ function _main(){
     cd pgbouncer_src/test
     sudo -u gpadmin -E ./test.sh
     cd ssl
-    sudo -u gpadmin -E ./test.sh
+    sudo -u gpadmin -E ./gpdb6-test.sh
 }
 
 _main "$@"

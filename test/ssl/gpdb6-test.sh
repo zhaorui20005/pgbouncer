@@ -155,7 +155,7 @@ test_server_ssl() {
 	echo "local all gpadmin ident" > ${PGDATA}/pg_hba.conf
 	echo "hostssl all all 127.0.0.1/32 trust" >> ${PGDATA}/pg_hba.conf
 	echo "hostssl all all ::1/128 trust" >> ${PGDATA}/pg_hba.conf
-	reconf_pgsql "ssl=on"
+	reconf_pgsql "ssl=on" "ssl_ca_file = 'root.crt'" "ssl_cert_file = 'server.crt'" "ssl_key_file = 'server.key'"
 	psql_bouncer -q -d p0 -c "select 'ssl-connect'" | tee tmp/test.tmp0
 	grep -q "ssl-connect"  tmp/test.tmp0
 	rc=$?
@@ -170,7 +170,7 @@ test_server_ssl_verify() {
 	echo "local all gpadmin ident" > ${PGDATA}/pg_hba.conf
 	echo "hostssl all all 127.0.0.1/32 trust" >> ${PGDATA}/pg_hba.conf
 	echo "hostssl all all ::1/128 trust" >> ${PGDATA}/pg_hba.conf
-	reconf_pgsql "ssl=on"
+	reconf_pgsql "ssl=on" "ssl_ca_file = 'root.crt'" "ssl_cert_file = 'server.crt'" "ssl_key_file = 'server.key'"
 	psql_bouncer -q -d p0 -c "select 'ssl-full-connect'" | tee tmp/test.tmp1
 	grep -q "ssl-full-connect"  tmp/test.tmp1
 	rc=$?
@@ -189,7 +189,7 @@ test_server_ssl_pg_auth() {
 	echo "host all gpadmin ::1/128 trust" >> ${PGDATA}/pg_hba.conf
 	echo "hostssl all all 127.0.0.1/32 cert" >> ${PGDATA}/pg_hba.conf
 	echo "hostssl all all ::1/128 cert" >> ${PGDATA}/pg_hba.conf
-	reconf_pgsql "ssl=on"
+	reconf_pgsql "ssl=on" "ssl_ca_file = 'root.crt'" "ssl_cert_file = 'server.crt'" "ssl_key_file = 'server.key'"
 	psql_bouncer -q -d p0 -c "select 'ssl-cert-connect'" | tee tmp/test.tmp2
 	grep "ssl-cert-connect"  tmp/test.tmp2
 	rc=$?

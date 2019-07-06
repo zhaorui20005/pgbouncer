@@ -886,9 +886,7 @@ void disconnect_client(PgSocket *client, bool notify, const char *reason, ...)
 				/* retval does not matter here */
 				release_server(server);
 			} else {
-				server->link = NULL;
-				client->link = NULL;
-				disconnect_server(server, true, "unclean server");
+                                release_server(server);
 			}
 		}
 	case CL_WAITING:

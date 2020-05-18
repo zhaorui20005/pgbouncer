@@ -5,17 +5,28 @@
 
 cd $(dirname $0)
 
+# set up gpdb source env
 which psql
 if [ $? -ne 0 ]
 then
 	source /usr/local/greenplum-db-devel/greenplum_path.sh
 	source ../../gpdb_src/gpAux/gpdemo/gpdemo-env.sh
 fi
+export PGDATA=$MASTER_DATA_DIRECTORY
+# PG_PORT is gpdb master server port and PGPORT will be set us pgboucer server port
+PG_PORT=${PGPORT}
+
+if [ ! -d $${PGDATA} ]; then
+	cp ${PGDATA}/pg_hba.conf ${PGDATA}/pg_hba.conf.orig
+fi
+
+# replace port in test.ini
+cp test.ini test.ini.orig
+sed -i "s/PGPORT/${PG_PORT}/" test.ini
 
 export PGPORT=6667
 export EF_ALLOW_MALLOC_0=1
 export LANG=C
-export PGDATA=$MASTER_DATA_DIRECTORY
 
 BOUNCER_LOG=test.log
 BOUNCER_INI=test.ini
@@ -25,7 +36,6 @@ BOUNCER_EXE="../pgbouncer"
 
 LOGDIR=log
 NC_PORT=6668
-PG_PORT=15432
 PG_LOG=$LOGDIR/pg.log
 
 ################################
@@ -87,6 +97,7 @@ psql -p $PG_PORT -l |grep p0 > /dev/null || {
 	psql -p $PG_PORT -c "create user bouncer" template1
 	createdb -p $PG_PORT p0
 	createdb -p $PG_PORT p1
+	createdb -p $PG_PORT p3
 }
 
 psql -p $PG_PORT -d p1 -c "select * from pg_user" | grep pswcheck > /dev/null || {
@@ -143,6 +154,9 @@ fw_reset() {
 complete() {
 	test -f $BOUNCER_PID && kill `cat $BOUNCER_PID` >/dev/null 2>&1
 	rm -f $BOUNCER_PID
+	cp ${PGDATA}/pg_hba.conf.orig ${PGDATA}/pg_hba.conf
+	rm test.ini
+	mv test.ini.orig test.ini
 }
 
 die() {
@@ -213,10 +227,18 @@ test_client_idle_timeout() {
 }
 
 # server_login_retry 
+# set server_login_retry to 10 instead of 1 beacuse
+# gpdb master will start firstly and segments are not
+# start yet. So the pgbouncer connect to master will
+# fail with the following message:
+#"FATAL System was started in master-only utility mode - only utility mode connections are allowed"
+# So it needs to try more times to login
+
 test_server_login_retry() {
-	admin "set query_timeout=30"
-	admin "set server_login_retry=1"
-	gpstop -ar
+	admin "set query_timeout=60"
+	admin "set server_login_retry=30"
+	(gpstop -aM fast; sleep 4; gpstart -a) &
+	sleep 2
 	psql -c "select now()" p0
 	rc=$?
 	wait
@@ -449,9 +471,10 @@ test_database_change() {
 
 # test connect string change
 test_auth_user() {
-	echo "local all gpadmin ident" > ${PGDATA}/pg_hba.conf
-	echo "host all all 127.0.0.1/32 trust" >> ${PGDATA}/pg_hba.conf
-	echo "host all all ::1/128 trust" >> ${PGDATA}/pg_hba.conf
+	echo "host all pswcheck 127.0.0.1/32 md5" >> ${PGDATA}/pg_hba.conf
+	echo "host all pswcheck  ::1/128 md5" >> ${PGDATA}/pg_hba.conf
+	echo "host all someuser 127.0.0.1/32 md5" >> ${PGDATA}/pg_hba.conf
+	echo "host all someuser  ::1/128 md5" >> ${PGDATA}/pg_hba.conf
 	gpstop -u
 	admin "set auth_type='md5'"
 	curuser=`psql -d "dbname=authdb user=someuser password=anypasswd" -tAq -c "select current_user;"`

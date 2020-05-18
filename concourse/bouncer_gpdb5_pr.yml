@@ -1,4 +1,4 @@
-## ======================================================================
+# ======================================================================
 ## resources
 ## ======================================================================
 
@@ -7,6 +7,11 @@ resource_types:
     type: docker-image
     source:
       repository: jtarchie/pr
+
+  - name: gcs
+    type: docker-image
+    source:
+        repository: frodenas/gcs-resource
 
 resources:
 - name: pgbouncer_pr
@@ -17,11 +22,13 @@ resources:
     repo: greenplum-db/pgbouncer
     uri: https://github.com/greenplum-db/pgbouncer.git
 
-- name: centos-gpdb-dev-6
-  type: docker-image
+- name: gpdb5-centos7-test
+  type: registry-image
   source:
-    repository: pivotaldata/centos-gpdb-dev
-    tag: '6-gcc6.2-llvm3.7'
+    password: {{gpss-docker-registry-key}}
+    repository: asia.gcr.io/data-gpdb-clients/gpdb5-centos7-test
+    tag: latest
+    username: _json_key
 
 - name: gpdb5_src
   type: git
@@ -32,14 +39,14 @@ resources:
     - gpdb-doc/*
     - README*
 
-- name: gpdb_src
-  type: git
+- name: bin_gpdb5_centos7
+  type: s3
   source:
-    branch: master
-    uri: https://github.com/greenplum-db/gpdb.git
-    ignore_paths:
-    - gpdb-doc/*
-    - README*
+    access_key_id: {{bucket-access-key-id}}
+    bucket: {{gpdb5-bucket-name}}
+    region_name: {{aws-region}}
+    secret_access_key: {{bucket-secret-access-key}}
+    versioned_file: {{bin_gpdb5_centos7_versioned_file}}
 
 jobs:
 - name: gpdb5_pgbouncer_test
@@ -48,8 +55,10 @@ jobs:
     - get: pgbouncer_pr
       trigger: true
       version: every
-    - get: centos-gpdb-dev-6
+    - get: gpdb5-centos7-test
     - get: gpdb5_src
+    - get: bin_gpdb
+      resource: bin_gpdb5_centos7
   - put: pgbouncer_pr
     params:
       path: pgbouncer_pr
@@ -67,7 +76,7 @@ jobs:
       - name: pgbouncer_bin
       run:
         path: pgbouncer_src/concourse/build.bash
-    image: centos-gpdb-dev-6
+    image: gpdb5-centos7-test
     on_failure: &pr_failure
       put: pgbouncer_pr
       params:
@@ -83,54 +92,10 @@ jobs:
       inputs:
       - name: pgbouncer_src
       - name: gpdb_src
+      - name: bin_gpdb
       run:
         path: pgbouncer_src/concourse/psql_test.bash
-    image: centos-gpdb-dev-6
-    on_failure: *pr_failure
-    timeout: 30m
-
-- name: gpdb6_pgbouncer_test
-  plan:
-  - aggregate:
-    - get: pgbouncer_pr
-      trigger: true
-      version: every
-    - get: centos-gpdb-dev-6
-    - get: gpdb_src
-  - put: pgbouncer_pr
-    params:
-      path: pgbouncer_pr
-      status: pending
-  - task: build_pgbouncer
-    input_mapping:
-      pgbouncer_src: pgbouncer_pr
-    config:
-      platform: linux
-      inputs:
-      - name: pgbouncer_src
-      - name: gpdb_src
-      outputs:
-      - name: pgbouncer_bin
-      run:
-        path: pgbouncer_src/concourse/build.bash
-    image: centos-gpdb-dev-6
-    on_failure: &pr_failure
-      put: pgbouncer_pr
-      params:
-        path: pgbouncer_pr
-        status: failure
-    timeout: 30m
-  - task: psql_test
-    input_mapping:
-      pgbouncer_src: pgbouncer_bin
-    config:
-      platform: linux
-      inputs:
-      - name: pgbouncer_src
-      - name: gpdb_src
-      run:
-        path: pgbouncer_src/concourse/gpdb6_psql_test.bash
-    image: centos-gpdb-dev-6
+    image: gpdb5-centos7-test
     on_failure: *pr_failure
     timeout: 30m
 
@@ -142,7 +107,6 @@ jobs:
       trigger: true
       passed:
       - gpdb5_pgbouncer_test
-      - gpdb6_pgbouncer_test
   - put: report_pr_success
     resource: pgbouncer_pr
     params:

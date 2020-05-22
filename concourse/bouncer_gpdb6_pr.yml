@@ -17,7 +17,7 @@ resources:
 - name: pgbouncer_pr
   type: pull_request
   source:
-    access_token: {{gpss-git-access-token}}
+    access_token: {{git-access-token}}
     branch: pgbouncer_1_8_1
     repo: greenplum-db/pgbouncer
     uri: https://github.com/greenplum-db/pgbouncer.git

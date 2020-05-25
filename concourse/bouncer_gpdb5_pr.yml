@@ -22,11 +22,11 @@ resources:
     repo: greenplum-db/pgbouncer
     uri: https://github.com/greenplum-db/pgbouncer.git
 
-- name: centos-gpdb-dev-6
+- name: centos-gpdb-dev-7
   type: docker-image
   source:
     repository: pivotaldata/centos-gpdb-dev
-    tag: '6-gcc6.2-llvm3.7'
+    tag: '7-gcc6.2-llvm3.7'
 
 - name: gpdb5_src
   type: git
@@ -53,7 +53,7 @@ jobs:
     - get: pgbouncer_pr
       trigger: true
       version: every
-    - get: centos-gpdb-dev-6
+    - get: centos-gpdb-dev-7
     - get: gpdb5_src
     - get: bin_gpdb
       resource: bin_gpdb5_centos7
@@ -74,7 +74,7 @@ jobs:
       - name: pgbouncer_bin
       run:
         path: pgbouncer_src/concourse/build.bash
-    image: centos-gpdb-dev-6
+    image: centos-gpdb-dev-7
     on_failure: &pr_failure
       put: pgbouncer_pr
       params:
@@ -93,7 +93,7 @@ jobs:
       - name: bin_gpdb
       run:
         path: pgbouncer_src/concourse/psql_test.bash
-    image: centos-gpdb-dev-6
+    image: centos-gpdb-dev-7
     on_failure: *pr_failure
     timeout: 30m
 

@@ -8,10 +8,12 @@ pgbouncer_SOURCES = \
 	src/auth.c \
 	src/client.c \
 	src/dnslookup.c \
+	src/hba.c \
 	src/janitor.c \
 	src/loader.c \
 	src/main.c \
 	src/objects.c \
+	src/pam.c \
 	src/pktbuf.c \
 	src/pooler.c \
 	src/proto.c \
@@ -26,10 +28,12 @@ pgbouncer_SOURCES = \
 	include/bouncer.h \
 	include/client.h \
 	include/dnslookup.h \
+	include/hba.h \
 	include/iobuf.h \
 	include/janitor.h \
 	include/loader.h \
 	include/objects.h \
+	include/pam.h \
 	include/pktbuf.h \
 	include/pooler.h \
 	include/proto.h \
@@ -54,32 +58,30 @@ STATICLIB = -lssl -lldap -llber -lssl -lcrypto
 
 pgbouncer_LIBS = -Wl,-Bstatic $(STATICLIB) -Wl,-Bdynamic -ldl
 
+pgbouncer_CPPFLAGS = -Iinclude $(CARES_CFLAGS) $(TLS_CPPFLAGS)
 
 # include libusual sources directly
 AM_FEATURES = libusual
 pgbouncer_EMBED_LIBUSUAL = 1
 
 # docs to install as-is
-dist_doc_DATA = README NEWS etc/pgbouncer.ini etc/userlist.txt
+#dist_doc_DATA = README.rst NEWS.rst etc/pgbouncer.ini etc/userlist.txt
 
-DISTCLEANFILES = config.mak config.status lib/usual/config.h config.log
+#DISTCLEANFILES = config.mak config.status lib/usual/config.h config.log
 
-SUBDIRS = doc
+#DIST_SUBDIRS = doc test
+#dist_man_MANS = doc/pgbouncer.1 doc/pgbouncer.5
 
 # files in tgz
-EXTRA_DIST = AUTHORS COPYRIGHT Makefile \
-	     config.mak.in etc/mkauth.py \
-	     config.sub config.guess install-sh autogen.sh \
-	     configure configure.ac \
+EXTRA_DIST = AUTHORS COPYRIGHT Makefile config.mak.in config.sub config.guess \
+	     install-sh autogen.sh configure configure.ac \
 	     debian/compat debian/changelog debian/control debian/rules debian/copyright \
-	     test/Makefile test/asynctest.c test/conntest.sh test/ctest6000.ini \
-	     test/ctest7000.ini test/run-conntest.sh test/stress.py test/test.ini \
-	     test/test.sh test/userlist.txt etc/example.debian.init.sh \
+	     etc/mkauth.py etc/example.debian.init.sh \
 	     win32/Makefile \
 	     $(LIBUSUAL_DIST)
 
 # libusual files (FIXME: list should be provided by libusual...)
-LIBUSUAL_DIST = $(filter-out %/config.h, $(wildcard \
+LIBUSUAL_DIST = $(filter-out %/config.h, $(sort $(wildcard \
 		lib/usual/*.[chg] \
 		lib/usual/*/*.[ch] \
 		lib/m4/*.m4 \
@@ -88,17 +90,14 @@ LIBUSUAL_DIST = $(filter-out %/config.h, $(wildcard \
 		lib/mk/antimake.mk lib/mk/antimake.txt \
 		lib/mk/install-sh lib/mk/std-autogen.sh \
 		lib/README lib/COPYRIGHT \
-		lib/find_modules.sh ))
-
-ifeq ($(enable_debug),yes)
-CPPFLAGS += -DDBGVER="\"compiled by <$${USER}@`hostname`> at `date '+%Y-%m-%d %H:%M:%S'`\""
-endif
+		lib/find_modules.sh )))
 
 #
 # win32
 #
 
-pgbouncer_LDADD := $(CARES_LIBS) $(LIBS)
+pgbouncer_LDFLAGS := $(TLS_LDFLAGS)
+pgbouncer_LDADD := $(CARES_LIBS) $(TLS_LIBS) $(LIBS)
 LIBS :=
 
 EXTRA_pgbouncer_SOURCES = win32/win32support.c win32/win32support.h
@@ -143,6 +142,7 @@ zip: configure clean
 	mkdir buildexe
 	cd buildexe \
 		&& ../configure --host=$(w32arch) --disable-debug \
+			--without-openssl \
 			--without-cares \
 			--with-libevent=/opt/apps/win32 --enable-evdns \
 		&& make \
@@ -160,6 +160,13 @@ tgz-up: $(tgz)
 
 .PHONY: tags
 tags:
-	ctags src/*.c include/*.h lib/usual/*.[ch]
-	etags src/*.c include/*.h lib/usual/*.[ch]
+	ctags src/*.c include/*.h lib/usual/*.[ch] lib/usual/*/*.[ch]
+
+htmls:
+	for f in *.rst doc/*.rst; do \
+		mkdir -p html && rst2html $$f > html/`basename $$f`.html; \
+	done
+
+doc/pgbouncer.1 doc/pgbouncer.5:
+	$(MAKE) -C doc
 

@@ -1,12 +1,12 @@
 /*
  * PgBouncer - Lightweight connection pooler for PostgreSQL.
- * 
+ *
  * Copyright (c) 2007-2009  Marko Kreen, Skype Technologies OÜ
- * 
+ *
  * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
  * copyright notice and this permission notice appear in all copies.
- * 
+ *
  * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
  * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
  * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
@@ -68,6 +68,14 @@ static PgPool *admin_pool;
 
 /* only valid during processing */
 static const char *current_query;
+
+void admin_cleanup(void)
+{
+	regfree(&rc_cmd);
+	regfree(&rc_set_str);
+	regfree(&rc_set_word);
+	admin_pool = NULL;
+}
 
 static bool syntax_error(PgSocket *admin)
 {
@@ -270,7 +278,7 @@ static bool send_one_fd(PgSocket *admin,
 	msg.msg_iovlen = 1;
 
 	/* attach a fd */
-	if (pga_is_unix(&admin->remote_addr) && admin->own_user) {
+	if (pga_is_unix(&admin->remote_addr) && admin->own_user && !admin->sbuf.tls) {
 		msg.msg_control = cntbuf;
 		msg.msg_controllen = sizeof(cntbuf);
 
@@ -285,7 +293,11 @@ static bool send_one_fd(PgSocket *admin,
 
 	slog_debug(admin, "sending socket list: fd=%d, len=%d",
 		   fd, (int)msg.msg_controllen);
-	res = safe_sendmsg(sbuf_socket(&admin->sbuf), &msg, 0);
+	if (msg.msg_controllen) {
+		res = safe_sendmsg(sbuf_socket(&admin->sbuf), &msg, 0);
+	} else {
+		res = sbuf_op_send(&admin->sbuf, pkt->buf, pktbuf_written(pkt));
+	}
 	if (res < 0) {
 		log_error("send_one_fd: sendmsg error: %s", strerror(errno));
 		return false;
@@ -310,11 +322,19 @@ static bool show_one_fd(PgSocket *admin, PgSocket *sk)
 	char addrbuf[PGADDR_BUF];
 	const char *password = NULL;
 
+	/* Skip TLS sockets */
+	if (sk->sbuf.tls || (sk->link && sk->link->sbuf.tls))
+		return true;
+
 	mbuf_init_fixed_reader(&tmp, sk->cancel_key, 8);
 	if (!mbuf_get_uint64be(&tmp, &ckey))
 		return false;
 
 	if (sk->pool->db->auth_user && sk->auth_user && !find_user(sk->auth_user->name))
+		password = sk->auth_user->passwd;
+
+	/* PAM requires passwords as well since they are not stored externally */
+	if (cf_auth_type == AUTH_PAM && !find_user(sk->auth_user->name))
 		password = sk->auth_user->passwd;
 
 	return send_one_fd(admin, sbuf_socket(&sk->sbuf),
@@ -457,10 +477,10 @@ static bool admin_show_databases(PgSocket *admin, const char *arg)
 		return true;
 	}
 
-	pktbuf_write_RowDescription(buf, "ssissiisii",
+	pktbuf_write_RowDescription(buf, "ssissiisiiii",
 				    "name", "host", "port",
 				    "database", "force_user", "pool_size", "reserve_pool",
-				    "pool_mode", "max_connections", "current_connections");
+				    "pool_mode", "max_connections", "current_connections", "paused", "disabled");
 	statlist_for_each(item, &database_list) {
 		db = container_of(item, PgDatabase, head);
 
@@ -469,14 +489,16 @@ static bool admin_show_databases(PgSocket *admin, const char *arg)
 		cv.value_p = &db->pool_mode;
 		if (db->pool_mode != POOL_INHERIT)
 			pool_mode_str = cf_get_lookup(&cv);
-		pktbuf_write_DataRow(buf, "ssissiisii",
+		pktbuf_write_DataRow(buf, "ssissiisiiii",
 				     db->name, db->host, db->port,
 				     db->dbname, f_user,
 				     db->pool_size,
 				     db->res_pool_size,
 				     pool_mode_str,
 				     database_max_connections(db),
-				     db->connection_count);
+				     db->connection_count,
+				     db->db_paused,
+				     db->db_disabled);
 	}
 	admin_flush(admin, buf, "SHOW");
 	return true;
@@ -542,8 +564,8 @@ static bool admin_show_users(PgSocket *admin, const char *arg)
 	return true;
 }
 
-#define SKF_STD "sssssisiTTssi"
-#define SKF_DBG "sssssisiTTssiiiiiiii"
+#define SKF_STD "sssssisiTTiissis"
+#define SKF_DBG "sssssisiTTiissisiiiiiii"
 
 static void socket_header(PktBuf *buf, bool debug)
 {
@@ -551,7 +573,9 @@ static void socket_header(PktBuf *buf, bool debug)
 				    "type", "user", "database", "state",
 				    "addr", "port", "local_addr", "local_port",
 				    "connect_time", "request_time",
-				    "ptr", "link", "remote_pid",
+				    "wait", "wait_us",
+				    "ptr", "link", "remote_pid", "tls",
+				    /* debug follows */
 				    "recv_pos", "pkt_pos", "pkt_remain",
 				    "send_pos", "send_remain",
 				    "pkt_avail", "send_avail");
@@ -569,6 +593,9 @@ static void socket_row(PktBuf *buf, PgSocket *sk, const char *state, bool debug)
 	char ptrbuf[128], linkbuf[128];
 	char l_addr[PGADDR_BUF], r_addr[PGADDR_BUF];
 	IOBuf *io = sk->sbuf.io;
+	char infobuf[96] = "";
+	usec_t now = get_cached_time();
+	usec_t wait_time = sk->query_start ? now - sk->query_start : 0;
 
 	if (io) {
 		pkt_avail = iobuf_amount_parse(sk->sbuf.io);
@@ -593,6 +620,9 @@ static void socket_row(PktBuf *buf, PgSocket *sk, const char *state, bool debug)
 	if (is_server_socket(sk) && remote_pid == 0)
 		remote_pid = be32dec(sk->cancel_key);
 
+	if (sk->sbuf.tls)
+		tls_get_connection_info(sk->sbuf.tls, infobuf, sizeof infobuf);
+
 	pktbuf_write_DataRow(buf, debug ? SKF_DBG : SKF_STD,
 			     is_server_socket(sk) ? "S" :"C",
 			     sk->auth_user ? sk->auth_user->name : "(nouser)",
@@ -601,7 +631,10 @@ static void socket_row(PktBuf *buf, PgSocket *sk, const char *state, bool debug)
 			     l_addr, pga_port(&sk->local_addr),
 			     sk->connect_time,
 			     sk->request_time,
-			     ptrbuf, linkbuf, remote_pid,
+			     (int)(wait_time / USEC),
+			     (int)(wait_time % USEC),
+			     ptrbuf, linkbuf, remote_pid, infobuf,
+			     /* debug */
 			     io ? io->recv_pos : 0,
 			     io ? io->parse_pos : 0,
 			     sk->sbuf.pkt_remain,
@@ -750,6 +783,7 @@ static bool admin_show_pools(PgSocket *admin, const char *arg)
 	PktBuf *buf;
 	PgSocket *waiter;
 	usec_t now = get_cached_time();
+	usec_t max_wait;
 	struct CfValue cv;
 	int pool_mode;
 
@@ -760,18 +794,19 @@ static bool admin_show_pools(PgSocket *admin, const char *arg)
 		admin_error(admin, "no mem");
 		return true;
 	}
-	pktbuf_write_RowDescription(buf, "ssiiiiiiiis",
+	pktbuf_write_RowDescription(buf, "ssiiiiiiiiis",
 				    "database", "user",
 				    "cl_active", "cl_waiting",
 				    "sv_active", "sv_idle",
 				    "sv_used", "sv_tested",
 				    "sv_login", "maxwait",
-				    "pool_mode");
+				    "maxwait_us", "pool_mode");
 	statlist_for_each(item, &pool_list) {
 		pool = container_of(item, PgPool, head);
 		waiter = first_socket(&pool->waiting_client_list);
+		max_wait = (waiter && waiter->query_start) ? now - waiter->query_start : 0;
 		pool_mode = pool_pool_mode(pool);
-		pktbuf_write_DataRow(buf, "ssiiiiiiiis",
+		pktbuf_write_DataRow(buf, "ssiiiiiiiiis",
 				     pool->db->name, pool->user->name,
 				     statlist_count(&pool->active_client_list),
 				     statlist_count(&pool->waiting_client_list),
@@ -781,8 +816,8 @@ static bool admin_show_pools(PgSocket *admin, const char *arg)
 				     statlist_count(&pool->tested_server_list),
 				     statlist_count(&pool->new_server_list),
 				     /* how long is the oldest client waited */
-				     (waiter && waiter->query_start)
-				     ?  (int)((now - waiter->query_start) / USEC) : 0,
+				     (int)(max_wait / USEC),
+				     (int)(max_wait % USEC),
 				     cf_get_lookup(&cv));
 	}
 	admin_flush(admin, buf, "SHOW");
@@ -834,7 +869,13 @@ static void dns_name_cb(void *arg, const char *name, const struct addrinfo *ai, 
 	}
 	*s = 0;
 
-	pktbuf_write_DataRow(buf, "sqs", name, (ttl - now) / USEC, adrs);
+	/*
+	 * Ttl can be smaller than now if we are waiting for dns reply for long.
+	 *
+	 * It's better to show 0 in that case as otherwise it confuses users into
+	 * thinking that there is large ttl for the name.
+	 */
+	pktbuf_write_DataRow(buf, "sqs", name, ttl < now ? 0 : (ttl - now) / USEC, adrs);
 }
 
 static bool admin_show_dns_hosts(PgSocket *admin, const char *arg)
@@ -1159,8 +1200,9 @@ static bool admin_show_help(PgSocket *admin, const char *arg)
 		"SNOTICE", "C00000", "MConsole usage",
 		"D\n\tSHOW HELP|CONFIG|DATABASES"
 		"|POOLS|CLIENTS|SERVERS|VERSION\n"
-		"\tSHOW STATS|FDS|SOCKETS|ACTIVE_SOCKETS|LISTS|MEM\n"
+		"\tSHOW FDS|SOCKETS|ACTIVE_SOCKETS|LISTS|MEM\n"
 		"\tSHOW DNS_HOSTS|DNS_ZONES\n"
+		"\tSHOW STATS|STATS_TOTALS|STATS_AVERAGES\n"
 		"\tSET key = arg\n"
 		"\tRELOAD\n"
 		"\tPAUSE [<db>]\n"
@@ -1191,6 +1233,16 @@ static bool admin_show_stats(PgSocket *admin, const char *arg)
 	return admin_database_stats(admin, &pool_list);
 }
 
+static bool admin_show_stats_totals(PgSocket *admin, const char *arg)
+{
+	return admin_database_stats_totals(admin, &pool_list);
+}
+
+static bool admin_show_stats_averages(PgSocket *admin, const char *arg)
+{
+	return admin_database_stats_averages(admin, &pool_list);
+}
+
 static bool admin_show_totals(PgSocket *admin, const char *arg)
 {
 	return show_stat_totals(admin, &pool_list);
@@ -1209,6 +1261,8 @@ static struct cmd_lookup show_map [] = {
 	{"sockets", admin_show_sockets},
 	{"active_sockets", admin_show_active_sockets},
 	{"stats", admin_show_stats},
+	{"stats_totals", admin_show_stats_totals},
+	{"stats_averages", admin_show_stats_averages},
 	{"users", admin_show_users},
 	{"version", admin_show_version},
 	{"totals", admin_show_totals},
@@ -1349,7 +1403,7 @@ bool admin_pre_login(PgSocket *client, const char *username)
 	}
 
 	/*
-	 * auth_mode=any does not keep original username around,
+	 * auth_type=any does not keep original username around,
 	 * so username based check has to take place here
 	 */
 	if (cf_auth_type == AUTH_ANY) {
@@ -1425,8 +1479,8 @@ void admin_setup(void)
 		fatal("cannot create admin welcome");
 	pktbuf_write_AuthenticationOk(msg);
 	pktbuf_write_ParameterStatus(msg, "server_version", PACKAGE_VERSION "/bouncer");
-	pktbuf_write_ParameterStatus(msg, "client_encoding", "UNICODE");
-	pktbuf_write_ParameterStatus(msg, "server_encoding", "SQL_ASCII");
+	pktbuf_write_ParameterStatus(msg, "client_encoding", "UTF8");
+	pktbuf_write_ParameterStatus(msg, "server_encoding", "UTF8");
 	pktbuf_write_ParameterStatus(msg, "DateStyle", "ISO");
 	pktbuf_write_ParameterStatus(msg, "TimeZone", "GMT");
 	pktbuf_write_ParameterStatus(msg, "standard_conforming_strings", "on");
@@ -1503,18 +1557,11 @@ void admin_pause_done(void)
 /* admin on console has pressed ^C */
 void admin_handle_cancel(PgSocket *admin)
 {
-	bool res;
-
 	/* weird, but no reason to fail */
 	if (!admin->wait_for_response)
 		slog_warning(admin, "admin cancel request for non-waiting client?");
 
 	if (cf_pause_mode != P_NONE)
 		full_resume();
-
-	/* notify readiness */
-	SEND_ReadyForQuery(res, admin);
-	if (!res)
-		disconnect_client(admin, false, "readiness send failed");
 }
 

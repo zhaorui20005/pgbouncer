@@ -275,23 +275,6 @@ static bool login_clear_psw(PgSocket *server)
 	return send_password(server, user->passwd);
 }
 
-static bool login_crypt_psw(PgSocket *server, const uint8_t *salt)
-{
-	char saltbuf[3];
-	const char *enc;
-	PgUser *user = get_srv_psw(server);
-
-	slog_debug(server, "P: send crypt password");
-	memcpy(saltbuf, salt, 2);
-	saltbuf[2] = 0;
-	enc = crypt(user->passwd, saltbuf);
-	if (!enc) {
-		slog_warning(server, "crypt failed");
-		return false;
-	}
-	return send_password(server, enc);
-}
-
 static bool login_md5_psw(PgSocket *server, const uint8_t *salt)
 {
 	char txt[MD5_PASSWD_LEN + 1], *src;
@@ -323,33 +306,22 @@ bool answer_authreq(PgSocket *server, PktHdr *pkt)
 	if (!mbuf_get_uint32be(&pkt->data, &cmd))
 		return false;
 	switch (cmd) {
-	case 0:
+	case AUTH_OK:
 		slog_debug(server, "S: auth ok");
 		res = true;
 		break;
-	case 3:
+	case AUTH_PLAIN:
 		slog_debug(server, "S: req cleartext password");
 		res = login_clear_psw(server);
 		break;
-	case 4:
-		slog_debug(server, "S: req crypt psw");
-		if (!mbuf_get_bytes(&pkt->data, 2, &salt))
-			return false;
-		res = login_crypt_psw(server, salt);
-		break;
-	case 5:
+	case AUTH_MD5:
 		slog_debug(server, "S: req md5-crypted psw");
 		if (!mbuf_get_bytes(&pkt->data, 4, &salt))
 			return false;
 		res = login_md5_psw(server, salt);
 		break;
-	case 2: /* kerberos */
-	case 6: /* deprecated usage of SCM_RIGHTS */
-		slog_error(server, "unsupported auth method: %d", cmd);
-		res = false;
-		break;
 	default:
-		slog_error(server, "unknown auth method: %d", cmd);
+		slog_error(server, "unknown/unsupported auth method: %d", cmd);
 		res = false;
 		break;
 	}
@@ -367,6 +339,13 @@ bool send_startup_packet(PgSocket *server)
 				    db->startup_params->buf,
 				    db->startup_params->write_pos);
 	return pktbuf_send_immediate(pkt, server);
+}
+
+bool send_sslreq_packet(PgSocket *server)
+{
+	int res;
+	SEND_wrap(16, pktbuf_write_SSLRequest, res, server);
+	return res;
 }
 
 int scan_text_result(struct MBuf *pkt, const char *tupdesc, ...)

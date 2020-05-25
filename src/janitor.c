@@ -508,7 +508,6 @@ static void cleanup_client_logins(void)
 	}
 }
 
-static void kill_database(PgDatabase *db);
 static void cleanup_inactive_autodatabases(void)
 {
 	struct List *item, *tmp;
@@ -586,7 +585,7 @@ static void do_full_maint(int sock, short flags, void *arg)
 		return;
 	}
 
-	if (cf_auth_type >= AUTH_TRUST)
+	if (requires_auth_file(cf_auth_type))
 		loader_users_check();
 
 	adns_zone_cache_maint(adns);
@@ -625,7 +624,7 @@ void kill_pool(PgPool *pool)
 	slab_free(pool_cache, pool);
 }
 
-static void kill_database(PgDatabase *db)
+void kill_database(PgDatabase *db)
 {
 	PgPool *pool;
 	struct List *item, *tmp;
@@ -637,7 +636,10 @@ static void kill_database(PgDatabase *db)
 		if (pool->db == db)
 			kill_pool(pool);
 	}
+
 	pktbuf_free(db->startup_params);
+	free(db->host);
+
 	if (db->forced_user)
 		slab_free(user_cache, db->forced_user);
 	if (db->connect_query)

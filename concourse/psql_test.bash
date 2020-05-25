@@ -10,26 +10,34 @@ function setup_gpdb_cluster() {
     export TEST_OS=centos
     export PGPORT=15432
     export CONFIGURE_FLAGS=" --with-openssl"
+    if [ ! -f "bin_gpdb/bin_gpdb.tar.gz" ];then
+        mv bin_gpdb/*.tar.gz bin_gpdb/bin_gpdb.tar.gz
+    fi
 
-   # time install_gpdb
-    time configure
-    cd gpdb_src
-    time make -j4 install
-    cd ../
-    time ./gpdb_src/concourse/scripts/setup_gpadmin_user.bash "$TEST_OS"
+    if [ "$(type -t install_and_configure_gpdb)" = "function" ] ; then
+        time install_and_configure_gpdb
+    else
+        # gpdb5 doesn't have function install_add_configure_gpdb
+        time configure
+        time install_gpdb
+    fi
+    time ${HOME_DIR}/gpdb_src/concourse/scripts/setup_gpadmin_user.bash "$TEST_OS"
+    export WITH_MIRRORS=false
     time make_cluster
     . /usr/local/greenplum-db-devel/greenplum_path.sh
     . gpdb_src/gpAux/gpdemo/gpdemo-env.sh
 }
 
 function _main(){
+    yum install -y sudo
     setup_gpdb_cluster
-    echo "gpadmin ALL=(ALL)       NOPASSWD: ALL" >> /etc/sudoers
     chown -R gpadmin:gpadmin pgbouncer_src
+    echo "gpadmin ALL=(ALL)       NOPASSWD: ALL" >> /etc/sudoers
     cd pgbouncer_src/test
-    sudo -u gpadmin -E ./test.sh
+    su  gpadmin -c "./test.sh"
+    su  gpadmin -c "make all"
     cd ssl
-    sudo -u gpadmin -E ./test.sh
+    su gpadmin -c "./test.sh"
 }
 
 _main "$@"

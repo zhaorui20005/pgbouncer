@@ -8,6 +8,8 @@ then
 	source /usr/local/greenplum-db-devel/greenplum_path.sh
 	source ../../../gpdb_src/gpAux/gpdemo/gpdemo-env.sh
 fi
+# PG_PORT is gpdb master server port and PGPORT will be set us pgboucer server port
+PG_PORT=${PGPORT}
 
 (
 ./newca.sh TestCA1 C=QQ O=Org1 CN="TestCA1"
@@ -32,7 +34,6 @@ BOUNCER_EXE="../../pgbouncer"
 
 LOGDIR=tmp
 NC_PORT=6668
-PG_PORT=15432
 PG_LOG=$LOGDIR/pg.log
 
 ################################
@@ -60,6 +61,9 @@ if [ ! -d $${PGDATA} ]; then
 	cp -p TestCA1/sites/01-localhost.crt ${PGDATA}/server.crt
 	cp -p TestCA1/sites/01-localhost.key ${PGDATA}/server.key
 	cp -p TestCA1/ca.crt ${PGDATA}/root.crt
+	# replace port in test.ini
+	cp test.ini test.ini.orig
+	sed -i "s/PGPORT/${PG_PORT}/" test.ini
 
 	echo '"bouncer" "zzz"' > tmp/userlist.txt
 
@@ -84,7 +88,7 @@ reconf_bouncer() {
 	done
 	test -f tmp/test.pid && kill `cat tmp/test.pid`
 	sleep 1
-	$BOUNCER_EXE -v -v -v -d tmp/test.ini
+	$BOUNCER_EXE -v -d tmp/test.ini
 }
 
 reconf_pgsql() {
@@ -110,6 +114,8 @@ complete() {
 	cp ${PGDATA}/pg_hba.conf.orig ${PGDATA}/pg_hba.conf
 	cp ${PGDATA}/pg_ident.conf.orig ${PGDATA}/pg_ident.conf
 	pg_ctl restart -w -t 3 -D $MASTER_DATA_DIRECTORY
+	rm test.ini
+	mv test.ini.orig test.ini
 	rm -f $BOUNCER_PID
 }
 
@@ -152,7 +158,6 @@ psql_bouncer() {
 # server_lifetime
 test_server_ssl() {
 	reconf_bouncer "auth_type = trust" "server_tls_sslmode = require" 
-	echo "local all gpadmin ident" > ${PGDATA}/pg_hba.conf
 	echo "hostssl all all 127.0.0.1/32 trust" >> ${PGDATA}/pg_hba.conf
 	echo "hostssl all all ::1/128 trust" >> ${PGDATA}/pg_hba.conf
 	reconf_pgsql "ssl=on"
@@ -167,7 +172,6 @@ test_server_ssl_verify() {
 		"server_tls_sslmode = verify-full" \
 		"server_tls_ca_file = TestCA1/ca.crt"
 
-	echo "local all gpadmin ident" > ${PGDATA}/pg_hba.conf
 	echo "hostssl all all 127.0.0.1/32 trust" >> ${PGDATA}/pg_hba.conf
 	echo "hostssl all all ::1/128 trust" >> ${PGDATA}/pg_hba.conf
 	reconf_pgsql "ssl=on"
@@ -184,9 +188,6 @@ test_server_ssl_pg_auth() {
 		"server_tls_key_file = TestCA1/sites/02-bouncer.key" \
 		"server_tls_cert_file = TestCA1/sites/02-bouncer.crt"
 
-	echo "local all gpadmin ident" > ${PGDATA}/pg_hba.conf
-	echo "host all gpadmin 127.0.0.1/32 trust" >> ${PGDATA}/pg_hba.conf
-	echo "host all gpadmin ::1/128 trust" >> ${PGDATA}/pg_hba.conf
 	echo "hostssl all all 127.0.0.1/32 cert" >> ${PGDATA}/pg_hba.conf
 	echo "hostssl all all ::1/128 cert" >> ${PGDATA}/pg_hba.conf
 	reconf_pgsql "ssl=on"
@@ -203,9 +204,8 @@ test_client_ssl() {
 		"client_tls_cert_file = TestCA1/sites/01-localhost.crt" \
 		"client_tls_ca_file = TestCA1/sites/01-localhost.crt"
 
-	echo "local all gpadmin ident" > ${PGDATA}/pg_hba.conf
 	echo "host all all 127.0.0.1/32 trust" >> ${PGDATA}/pg_hba.conf
-	echo "hostssl all all ::1/128 trust" >> ${PGDATA}/pg_hba.conf
+	echo "host all all ::1/128 trust" >> ${PGDATA}/pg_hba.conf
 	reconf_pgsql "ssl=on"
 	psql_bouncer -q -d "dbname=p0 sslmode=require" -c "select 'client-ssl-connect'" | tee tmp/test.tmp
 	grep -q "client-ssl-connect"  tmp/test.tmp
@@ -220,7 +220,6 @@ test_client_ssl_ca() {
 		"client_tls_cert_file = TestCA1/sites/01-localhost.crt" \
 		"client_tls_ca_file = TestCA1/sites/01-localhost.crt"
 
-	echo "local all gpadmin ident" > ${PGDATA}/pg_hba.conf
 	echo "host all all  127.0.0.1/32 trust" >> ${PGDATA}/pg_hba.conf
 	echo "host all all ::1/128 trust" >> ${PGDATA}/pg_hba.conf
 	reconf_pgsql "ssl=on"
@@ -237,7 +236,6 @@ test_client_ssl_auth() {
 		"client_tls_key_file = TestCA1/sites/01-localhost.key" \
 		"client_tls_cert_file = TestCA1/sites/01-localhost.crt"
 
-	echo "local all gpadmin ident" > ${PGDATA}/pg_hba.conf
 	echo "host all all 127.0.0.1/32 trust" >> ${PGDATA}/pg_hba.conf 
 	echo "host all all ::1/128 trust" >> ${PGDATA}/pg_hba.conf
 	reconf_pgsql "ssl=on"

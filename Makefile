@@ -5,7 +5,6 @@ bin_PROGRAMS = pgbouncer
 
 pgbouncer_SOURCES = \
 	src/admin.c \
-	src/auth.c \
 	src/client.c \
 	src/dnslookup.c \
 	src/hba.c \

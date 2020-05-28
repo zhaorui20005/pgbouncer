@@ -676,11 +676,11 @@ Default: not set
 Which TLS protocol versions are allowed.  Allowed values: `tlsv1.0`, `tlsv1.1`, `tlsv1.2`, `tlsv1.3`.
 Shortcuts: `all` (tlsv1.0,tlsv1.1,tlsv1.2,tlsv1.3), `secure` (tlsv1.2,tlsv1.3), `legacy` (all).
 
-Default: `secure`
+Default: `all`
 
 ### server_tls_ciphers
 
-Default: `fast`
+Default: `HIGH:MEDIUM:+3DES:!aNULL`
 
 
 ## Dangerous timeouts

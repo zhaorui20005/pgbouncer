@@ -45,6 +45,17 @@ NC_PORT=6668
 # PG_PORT=6666
 PG_LOG=$LOGDIR/pg.log
 
+# gpdb doesn't support alter system, so use the following function to reconfig it
+reconf_pgsql() {
+	cp ${PGDATA}/postgresql.conf.orig ${PGDATA}/postgresql.conf
+	for ln in "$@"; do
+		echo "$ln" >> ${PGDATA}/postgresql.conf
+	done
+	gpstop  -u
+	#pg_ctl restart -w -t 3 -D $MASTER_DATA_DIRECTORY
+}
+
+
 pgctl() {
 	pg_ctl -w -o "-p $PG_PORT" -D $PGDATA $@ >>$PG_LOG 2>&1
 }
@@ -138,6 +149,7 @@ rm -f $BOUNCER_LOG $PG_LOG
 	host   all  all  127.0.0.1/32  trust
 	host   all  all  ::1/128       trust
 	EOF
+	gpstop -u
 #fi
 
 #pgctl start
@@ -283,16 +295,6 @@ runtest() {
 	mv $BOUNCER_LOG $LOGDIR/$1.log
 
 	return $status
-}
-
-# gpdb doesn't support alter system, so use the following function to reconfig it
-reconf_pgsql() {
-	cp ${PGDATA}/postgresql.conf.orig ${PGDATA}/postgresql.conf
-	for ln in "$@"; do
-		echo "$ln" >> ${PGDATA}/postgresql.conf
-	done
-	gpstop  -u
-	#pg_ctl restart -w -t 3 -D $MASTER_DATA_DIRECTORY
 }
 
 # show version and --version

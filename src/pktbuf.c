@@ -1,12 +1,12 @@
 /*
  * PgBouncer - Lightweight connection pooler for PostgreSQL.
- * 
+ *
  * Copyright (c) 2007-2009  Marko Kreen, Skype Technologies OÜ
- * 
+ *
  * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
  * copyright notice and this permission notice appear in all copies.
- * 
+ *
  * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
  * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
  * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
@@ -21,6 +21,16 @@
  */
 
 #include "bouncer.h"
+
+
+/*
+ * PostgreSQL type OIDs for result sets
+ */
+#define INT8OID 20
+#define INT4OID 23
+#define TEXTOID 25
+#define NUMERICOID 1700
+
 
 void pktbuf_free(PktBuf *buf)
 {
@@ -73,46 +83,52 @@ void pktbuf_static(PktBuf *buf, uint8_t *data, int len)
 	buf->fixed_buf = 1;
 }
 
+static PktBuf *temp_pktbuf;
+
 struct PktBuf *pktbuf_temp(void)
 {
-	static PktBuf *temp_pktbuf;
-
 	if (!temp_pktbuf)
 		temp_pktbuf = pktbuf_dynamic(512);
 	if (!temp_pktbuf)
-		fatal("failed to create temp pktbuf");
+		die("out of memory");
 	pktbuf_reset(temp_pktbuf);
 	return temp_pktbuf;
 }
 
+void pktbuf_cleanup(void)
+{
+	pktbuf_free(temp_pktbuf);
+	temp_pktbuf = NULL;
+}
+
 bool pktbuf_send_immediate(PktBuf *buf, PgSocket *sk)
 {
-	int fd = sbuf_socket(&sk->sbuf);
 	uint8_t *pos = buf->buf + buf->send_pos;
 	int amount = buf->write_pos - buf->send_pos;
 	int res;
 
 	if (buf->failed)
 		return false;
-	res = safe_send(fd, pos, amount, 0);
+	res = sbuf_op_send(&sk->sbuf, pos, amount);
 	if (res < 0) {
 		log_debug("pktbuf_send_immediate: %s", strerror(errno));
 	}
 	return res == amount;
 }
 
-static void pktbuf_send_func(int fd, short flags, void *arg)
+static void pktbuf_send_func(evutil_socket_t fd, short flags, void *arg)
 {
 	PktBuf *buf = arg;
+	SBuf *sbuf = &buf->queued_dst->sbuf;
 	int amount, res;
 
-	log_debug("pktbuf_send_func(%d, %d, %p)", fd, (int)flags, buf);
+	log_debug("pktbuf_send_func(%" PRId64 ", %d, %p)", (int64_t)fd, (int)flags, buf);
 
 	if (buf->failed)
 		return;
 
 	amount = buf->write_pos - buf->send_pos;
-	res = safe_send(fd, buf->buf + buf->send_pos, amount, 0);
+	res = sbuf_op_send(sbuf, buf->buf + buf->send_pos, amount);
 	if (res < 0) {
 		if (errno == EAGAIN) {
 			res = 0;
@@ -125,7 +141,7 @@ static void pktbuf_send_func(int fd, short flags, void *arg)
 	buf->send_pos += res;
 
 	if (buf->send_pos < buf->write_pos) {
-		event_set(buf->ev, fd, EV_WRITE, pktbuf_send_func, buf);
+		event_assign(buf->ev, pgb_event_base, fd, EV_WRITE, pktbuf_send_func, buf);
 		res = event_add(buf->ev, NULL);
 		if (res < 0) {
 			log_error("pktbuf_send_func: %s", strerror(errno));
@@ -138,8 +154,6 @@ static void pktbuf_send_func(int fd, short flags, void *arg)
 
 bool pktbuf_send_queued(PktBuf *buf, PgSocket *sk)
 {
-	int fd = sbuf_socket(&sk->sbuf);
-
 	Assert(!buf->sending);
 	Assert(!buf->fixed_buf);
 
@@ -148,7 +162,8 @@ bool pktbuf_send_queued(PktBuf *buf, PgSocket *sk)
 		return send_pooler_error(sk, true, "result prepare failed");
 	} else {
 		buf->sending = 1;
-		pktbuf_send_func(fd, EV_WRITE, buf);
+		buf->queued_dst = sk;
+		pktbuf_send_func(sk->sbuf.sock, EV_WRITE, buf);
 		return true;
 	}
 }
@@ -169,7 +184,7 @@ static void make_room(PktBuf *buf, int len)
 		buf->failed = 1;
 		return;
 	}
-	
+
 	while (newlen < need)
 		newlen = newlen * 2;
 
@@ -215,7 +230,7 @@ void pktbuf_put_uint32(PktBuf *buf, uint32_t val)
 	pos[0] = (val >> 24) & 255;
 	pos[1] = (val >> 16) & 255;
 	pos[2] = (val >> 8) & 255;
-	pos[3] = val & 255; 
+	pos[3] = val & 255;
 	buf->write_pos += 4;
 }
 
@@ -276,7 +291,7 @@ void pktbuf_finish_packet(PktBuf *buf)
 	*pos++ = (len >> 24) & 255;
 	*pos++ = (len >> 16) & 255;
 	*pos++ = (len >> 8) & 255;
-	*pos++ = len & 255; 
+	*pos++ = len & 255;
 }
 
 /* types:
@@ -336,6 +351,7 @@ void pktbuf_write_generic(PktBuf *buf, int type, const char *pktdesc, ...)
  * 'i' - int4
  * 'q' - int8
  * 's' - string
+ * 'N' - uint64_t to numeric
  * 'T' - usec_t to date
  */
 void pktbuf_write_RowDescription(PktBuf *buf, const char *tupdesc, ...)
@@ -367,13 +383,16 @@ void pktbuf_write_RowDescription(PktBuf *buf, const char *tupdesc, ...)
 		} else if (tupdesc[i] == 'q') {
 			pktbuf_put_uint32(buf, INT8OID);
 			pktbuf_put_uint16(buf, 8);
+		} else if (tupdesc[i] == 'N') {
+			pktbuf_put_uint32(buf, NUMERICOID);
+			pktbuf_put_uint16(buf, -1);
 		} else if (tupdesc[i] == 'T') {
 			pktbuf_put_uint32(buf, TEXTOID);
 			pktbuf_put_uint16(buf, -1);
 		} else {
 			fatal("bad tupdesc");
 		}
-		pktbuf_put_uint32(buf, 0);
+		pktbuf_put_uint32(buf, -1);
 		pktbuf_put_uint16(buf, 0);
 	}
 	va_end(ap);
@@ -389,6 +408,7 @@ void pktbuf_write_RowDescription(PktBuf *buf, const char *tupdesc, ...)
  * 'i' - int4
  * 'q' - int8
  * 's' - string
+ * 'N' - uint64_t to numeric
  * 'T' - usec_t to date
  */
 void pktbuf_write_DataRow(PktBuf *buf, const char *tupdesc, ...)
@@ -406,7 +426,7 @@ void pktbuf_write_DataRow(PktBuf *buf, const char *tupdesc, ...)
 		if (tupdesc[i] == 'i') {
 			snprintf(tmp, sizeof(tmp), "%d", va_arg(ap, int));
 			val = tmp;
-		} else if (tupdesc[i] == 'q') {
+		} else if (tupdesc[i] == 'q' || tupdesc[i] == 'N') {
 			snprintf(tmp, sizeof(tmp), "%" PRIu64, va_arg(ap, uint64_t));
 			val = tmp;
 		} else if (tupdesc[i] == 's') {
@@ -472,4 +492,3 @@ void pktbuf_write_ExtQuery(PktBuf *buf, const char *query, int nargs, ...)
 	/* Sync */
 	pktbuf_write_generic(buf, 'S', "");
 }
-

@@ -1,4 +1,3 @@
-
 enum VarCacheIdx {
 	VDateStyle = 0,
 	VClientEncoding,
@@ -19,4 +18,4 @@ bool varcache_apply(PgSocket *server, PgSocket *client, bool *changes_p) _MUSTCH
 void varcache_fill_unset(VarCache *src, PgSocket *dst);
 void varcache_clean(VarCache *cache);
 void varcache_add_params(PktBuf *pkt, VarCache *vars);
-
+void varcache_deinit(void);

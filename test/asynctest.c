@@ -6,30 +6,29 @@
  * - variable-size query
  */
 
-#include "system.h"
-
 #ifdef WIN32
 #undef strerror
 #undef main
 #endif
 
-#include <getopt.h>
-#include <event.h>
+#include <usual/logging.h>
+#include <usual/getopt.h>
+#include <usual/logging.h>
+#include <usual/list.h>
+#include <usual/statlist.h>
+#include <usual/time.h>
+#include <usual/string.h>
+
+#include <event2/event.h>
+#include <event2/event_struct.h>
 #include <libpq-fe.h>
-
-static void log_error(const char *, ...);
-static void log_debug(const char *, ...);
-static void fatal(const char *fmt, ...);
-static void fatal_noexit(const char *fmt, ...);
-
-#include "list.h"
 
 static char *simple_query = "select 1";
 
-typedef void (*libev_cb_f)(int sock, short flags, void *arg);
+static struct event_base *evbase;
 
 typedef struct DbConn {
-	List		head;
+	struct List	head;
 	const char	*connstr;
 	struct event	ev;
 	PGconn		*con;
@@ -60,29 +59,9 @@ static int per_conn_queries = 1;
 static STATLIST(idle_list);
 static STATLIST(active_list);
 
-static usec_t _time_cache = 0;
-
 /*
  * utility functions
  */
-
-static usec_t get_time_usec(void)
-{
-	struct timeval tv;
-	gettimeofday(&tv, NULL);
-	return (usec_t)tv.tv_sec * USEC + tv.tv_usec;
-}
-
-static usec_t get_cached_time(void)
-{
-	if (!_time_cache)
-		_time_cache = get_time_usec();
-	return _time_cache;
-}
-static void reset_time_cache(void)
-{
-	_time_cache = 0;
-}
 
 /* fill mem with random junk */
 static void init_bulk_data(void)
@@ -106,72 +85,21 @@ static DbConn *new_db(const char *connstr)
 
 static void set_idle(DbConn *db)
 {
-	Assert(item_in_list(&db->head, &active_list.head));
-	statlist_remove(&db->head, &active_list);
-	statlist_append(&db->head, &idle_list);
+	statlist_remove(&active_list, &db->head);
+	statlist_append(&idle_list, &db->head);
 	log_debug("%p: set_idle", db);
 }
 
 static void set_active(DbConn *db)
 {
-	Assert(item_in_list(&db->head, &idle_list.head));
-	statlist_remove(&db->head, &idle_list);
-	statlist_append(&db->head, &active_list);
+	statlist_remove(&idle_list, &db->head);
+	statlist_append(&active_list, &db->head);
 	log_debug("%p: set_active", db);
 }
 
-static void fatal_perror(const char *err)
+static void wait_event(DbConn *db, short ev, event_callback_fn fn)
 {
-	log_error("%s: %s", err, strerror(errno));
-	exit(1);
-}
-
-static void fatal_noexit(const char *fmt, ...)
-{
-	va_list ap;
-	char buf[1024];
-	va_start(ap, fmt);
-	vsnprintf(buf, sizeof(buf), fmt, ap);
-	va_end(ap);
-	printf("FATAL: %s\n", buf);
-}
-
-static void fatal(const char *fmt, ...)
-{
-	va_list ap;
-	char buf[1024];
-	va_start(ap, fmt);
-	vsnprintf(buf, sizeof(buf), fmt, ap);
-	va_end(ap);
-	printf("FATAL: %s\n", buf);
-	exit(1);
-}
-
-static void log_debug(const char *fmt, ...)
-{
-	va_list ap;
-	char buf[1024];
-	if (verbose == 0)
-		return;
-	va_start(ap, fmt);
-	vsnprintf(buf, sizeof(buf), fmt, ap);
-	va_end(ap);
-	printf("dbg: %s\n", buf);
-}
-
-static void log_error(const char *fmt, ...)
-{
-	va_list ap;
-	char buf[1024];
-	va_start(ap, fmt);
-	vsnprintf(buf, sizeof(buf), fmt, ap);
-	va_end(ap);
-	printf("ERR: %s\n", buf);
-}
-
-static void wait_event(DbConn *db, short ev, libev_cb_f fn)
-{
-	event_set(&db->ev, PQsocket(db->con), ev, fn, db);
+	event_assign(&db->ev, evbase, PQsocket(db->con), ev, fn, db);
 	if (event_add(&db->ev, NULL) < 0)
 		fatal_perror("event_add");
 }
@@ -240,6 +168,7 @@ static bool another_result(DbConn *db)
 				       db->_arglen, curlen);
 			}
 		}
+		/* fallthrough */
 	case PGRES_COMMAND_OK:
 		PQclear(res);
 		break;
@@ -406,7 +335,7 @@ static void launch_connect(DbConn *db)
 static void handle_idle(void)
 {
 	DbConn *db;
-	List *item, *tmp;
+	struct List *item, *tmp;
 	int allow_connects = 100000;
 	int allow_queries = 100000;
 	static usec_t startup_time = 0;
@@ -484,7 +413,7 @@ static void run_stats(int fd, short ev, void *arg)
 	}
 
 	if (!last_time)
-		evtimer_set(&ev_stats, run_stats, NULL);
+		evtimer_assign(&ev_stats, evbase, run_stats, NULL);
 	if (evtimer_add(&ev_stats, &period) < 0)
 		fatal_perror("evtimer_add");
 
@@ -515,7 +444,7 @@ int main(int argc, char *argv[])
 	int i, c;
 	DbConn *db;
 	unsigned seed = time(NULL) ^ getpid();
-	char *cstr = NULL;
+	char *cstr = "";
 	int numcon = 50;
 #ifdef WIN32
 	int wsresult;
@@ -564,15 +493,11 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	if (!cstr) {
-		printf(usage_str);
-		return 1;
-	}
 #ifdef WIN32
         wsresult = WSAStartup(MAKEWORD(2,0),&wsaData);
         if (wsresult != 0)
         {
-                fatal("Cannot start the network subsystem -%d", wsresult);
+                fatal("cannot start the network subsystem: -%d", wsresult);
         }
 #endif
 	if (throttle_connects < 0 || throttle_queries < 0 || numcon < 0)
@@ -588,10 +513,10 @@ int main(int argc, char *argv[])
 
 	for (i = 0; i < numcon; i++) {
 		db = new_db(cstr);
-		statlist_append(&db->head, &idle_list);
+		statlist_append(&idle_list, &db->head);
 	}
 
-	event_init();
+	evbase = event_base_new();
 
 	run_stats(0, 0, NULL);
 
@@ -600,10 +525,8 @@ int main(int argc, char *argv[])
 	while (1) {
 		handle_idle();
 		reset_time_cache();
-		if (event_loop(EVLOOP_ONCE) < 0)
+		if (event_base_loop(evbase, EVLOOP_ONCE) < 0)
 			log_error("event_loop: %s", strerror(errno));
 	}
 	return 0;
 }
-
-

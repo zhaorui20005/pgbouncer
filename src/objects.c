@@ -1,12 +1,12 @@
 /*
  * PgBouncer - Lightweight connection pooler for PostgreSQL.
- * 
+ *
  * Copyright (c) 2007-2009  Marko Kreen, Skype Technologies OÜ
- * 
+ *
  * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
  * copyright notice and this permission notice appear in all copies.
- * 
+ *
  * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
  * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
  * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
@@ -21,13 +21,23 @@
  */
 
 #include "bouncer.h"
+#include "scram.h"
 
 /* those items will be allocated as needed, never freed */
 STATLIST(user_list);
 STATLIST(database_list);
 STATLIST(pool_list);
 
+/* All locally defined users (in auth_file) are kept here. */
 struct AATree user_tree;
+
+/*
+ * All PAM users are kept here. We need to differentiate two user
+ * lists to avoid user clashing for different authentication types,
+ * and because pam_user_tree is closer to PgDatabase.user_tree in
+ * logic.
+ */
+struct AATree pam_user_tree;
 
 /*
  * client and server objects will be pre-allocated
@@ -105,6 +115,7 @@ static void user_node_release(struct AANode *node, void *arg)
 void init_objects(void)
 {
 	aatree_init(&user_tree, user_node_cmp, NULL);
+	aatree_init(&pam_user_tree, user_node_cmp, NULL);
 	user_cache = slab_create("user_cache", sizeof(PgUser), 0, NULL, USUAL_ALLOC);
 	db_cache = slab_create("db_cache", sizeof(PgDatabase), 0, NULL, USUAL_ALLOC);
 	pool_cache = slab_create("pool_cache", sizeof(PgPool), 0, NULL, USUAL_ALLOC);
@@ -147,6 +158,7 @@ void change_client_state(PgSocket *client, SocketState newstate)
 	case CL_WAITING_LOGIN:
 		if (newstate == CL_ACTIVE)
 			newstate = CL_LOGIN;
+		/* fallthrough */
 	case CL_WAITING:
 		statlist_remove(&pool->waiting_client_list, &client->head);
 		break;
@@ -176,6 +188,7 @@ void change_client_state(PgSocket *client, SocketState newstate)
 		break;
 	case CL_WAITING:
 	case CL_WAITING_LOGIN:
+		client->wait_start = get_cached_time();
 		statlist_append(&pool->waiting_client_list, &client->head);
 		break;
 	case CL_ACTIVE:
@@ -318,7 +331,7 @@ PgDatabase *add_database(const char *name)
 
 		list_init(&db->head);
 		if (strlcpy(db->name, name, sizeof(db->name)) >= sizeof(db->name)) {
-			log_warning("Too long db name: %s", name);
+			log_warning("too long db name: %s", name);
 			slab_free(db_cache, db);
 			return NULL;
 		}
@@ -335,7 +348,7 @@ PgDatabase *register_auto_database(const char *name)
 	PgDatabase *db;
 	int len;
 	char *cs;
-	
+
 	if (!cf_autodb_connstr)
 		return NULL;
 
@@ -404,6 +417,32 @@ PgUser *add_db_user(PgDatabase *db, const char *name, const char *passwd)
 		user->pool_mode = POOL_INHERIT;
 	}
 	safe_strcpy(user->passwd, passwd, sizeof(user->passwd));
+	return user;
+}
+
+/* Add PAM user. The logic is same as in add_db_user */
+PgUser *add_pam_user(const char *name, const char *passwd)
+{
+	PgUser *user = NULL;
+	struct AANode *node;
+
+	node = aatree_search(&pam_user_tree, (uintptr_t)name);
+	user = node ? container_of(node, PgUser, tree_node) : NULL;
+
+	if (user == NULL) {
+		user = slab_alloc(user_cache);
+		if (!user)
+			return NULL;
+
+		list_init(&user->head);
+		list_init(&user->pool_list);
+		safe_strcpy(user->name, name, sizeof(user->name));
+
+		aatree_insert(&pam_user_tree, (uintptr_t)user->name, &user->tree_node);
+		user->pool_mode = POOL_INHERIT;
+	}
+	if (passwd)
+		safe_strcpy(user->passwd, passwd, sizeof(user->passwd));
 	return user;
 }
 
@@ -525,13 +564,18 @@ void activate_client(PgSocket *client)
 {
 	Assert(client->state == CL_WAITING || client->state == CL_WAITING_LOGIN);
 
+	Assert(client->wait_start > 0);
+
+	/* acount for time client spent waiting for server */
+	client->pool->stats.wait_time += (get_cached_time() - client->wait_start);
+
 	slog_debug(client, "activate_client");
 	change_client_state(client, CL_ACTIVE);
 	sbuf_continue(&client->sbuf);
 }
 
 /*
- * Don't let clients queue at all, if there is no working server connection.
+ * Don't let clients queue at all if there is no working server connection.
  *
  * It must still allow following cases:
  * - empty pool on startup
@@ -542,22 +586,35 @@ void activate_client(PgSocket *client)
  * - new server connections fail due to server_connect_timeout, or other failure
  *
  * So here we drop client if all server connections have been dropped
- * and new one's fail.
+ * and new ones fail.
+ *
+ * Return true if the client connection should be allowed, false if it
+ * should be rejected.
  */
 bool check_fast_fail(PgSocket *client)
 {
 	int cnt;
 	PgPool *pool = client->pool;
 
-	/* reject if no servers and last connect failed */
-	if (!pool->last_connect_failed)
+	/* If last login succeeded, client can go ahead. */
+	if (!pool->last_login_failed)
 		return true;
+
+	/* If there are servers available, client can go ahead. */
 	cnt = pool_server_count(pool) - statlist_count(&pool->new_server_list);
 	if (cnt)
 		return true;
+
+	/* Else we fail the client. */
 	disconnect_client(client, true, "pgbouncer cannot connect to server");
 
-	/* usual relaunch won't work, as there are no waiting clients */
+	/*
+	 * Try to launch a new connection.  (launch_new_connection()
+	 * will check for server_login_retry etc.)  The usual relaunch
+	 * from janitor.c won't do anything, as there are no waiting
+	 * clients, so we need to do it here to get any new servers
+	 * eventually.
+	 */
 	launch_new_connection(pool);
 
 	return false;
@@ -572,6 +629,9 @@ bool find_server(PgSocket *client)
 	bool varchange = false;
 
 	Assert(client->state == CL_ACTIVE || client->state == CL_LOGIN);
+
+	/* no wait by default */
+	client->wait_start = 0;
 
 	if (client->link)
 		return true;
@@ -653,10 +713,10 @@ static bool reuse_on_release(PgSocket *server)
 static bool reset_on_release(PgSocket *server)
 {
 	bool res;
-	
+
 	Assert(server->state == SV_TESTED);
 
-	slog_debug(server, "Resetting: %s", cf_server_reset_query);
+	slog_debug(server, "resetting: %s", cf_server_reset_query);
 	SEND_generic(res, server, 'Q', "s", cf_server_reset_query);
 	if (!res)
 		disconnect_server(server, false, "reset query failed");
@@ -714,6 +774,7 @@ bool release_server(PgSocket *server)
 	case SV_TESTED:
 		break;
 	case SV_LOGIN:
+		pool->last_login_failed = 0;
 		pool->last_connect_failed = 0;
 		break;
 	default:
@@ -764,7 +825,7 @@ void disconnect_server(PgSocket *server, bool notify, const char *reason, ...)
 	reason = buf;
 
 	if (cf_log_disconnections)
-		slog_info(server, "closing because: %s (age=%" PRIu64 ")", reason,
+		slog_info(server, "closing because: %s (age=%" PRIu64 "s)", reason,
 			  (now - server->connect_time) / USEC);
 
 	switch (server->state) {
@@ -786,9 +847,20 @@ void disconnect_server(PgSocket *server, bool notify, const char *reason, ...)
 		 * except when sending cancel packet
 		 */
 		if (!server->ready)
+		{
+			pool->last_login_failed = 1;
 			pool->last_connect_failed = 1;
+		}
 		else
+		{
+			/*
+			 * We did manage to connect and used the connection for query
+			 * cancellation, so to the best of our knowledge we can connect to
+			 * the server, reset last_connect_failed accordingly.
+			 */
+			pool->last_connect_failed = 0;
 			send_term = 0;
+		}
 		break;
 	default:
 		fatal("disconnect_server: bad server state (%d)", server->state);
@@ -798,15 +870,16 @@ void disconnect_server(PgSocket *server, bool notify, const char *reason, ...)
 
 	/* notify server and close connection */
 	if (send_term && notify) {
-		if (!sbuf_answer(&server->sbuf, pkt_term, sizeof(pkt_term)))
-			/* ignore result */
-			notify = false;
+		bool _ignore = sbuf_answer(&server->sbuf, pkt_term, sizeof(pkt_term));
+		(void) _ignore;
 	}
 
 	if (server->dns_token) {
 		adns_cancel(adns, server->dns_token);
 		server->dns_token = NULL;
 	}
+
+	free_scram_state(&server->scram_state);
 
 	server->pool->db->connection_count--;
 	server->pool->user->connection_count--;
@@ -829,7 +902,7 @@ void disconnect_client(PgSocket *client, bool notify, const char *reason, ...)
 	reason = buf;
 
 	if (cf_log_disconnections)
-		slog_info(client, "closing because: %s (age=%" PRIu64 ")", reason,
+		slog_info(client, "closing because: %s (age=%" PRIu64 "s)", reason,
 			  (now - client->connect_time) / USEC);
 
 	switch (client->state) {
@@ -863,6 +936,8 @@ void disconnect_client(PgSocket *client, bool notify, const char *reason, ...)
 		 */
 		send_pooler_error(client, false, reason);
 	}
+
+	free_scram_state(&client->scram_state);
 
 	change_client_state(client, CL_JUSTFREE);
 	if (!sbuf_close(&client->sbuf))
@@ -904,7 +979,7 @@ static void dns_callback(void *arg, const struct sockaddr *sa, int salen)
 	server->dns_token = NULL;
 
 	if (!sa) {
-		disconnect_server(server, true, "server dns lookup failed");
+		disconnect_server(server, true, "server DNS lookup failed");
 		return;
 	} else if (sa->sa_family == AF_INET) {
 		char buf[64];
@@ -943,17 +1018,17 @@ static void dns_connect(struct PgSocket *server)
 	int res;
 
 	if (!host || host[0] == '/') {
-		slog_noise(server, "unix socket: %s", sa_un.sun_path);
 		memset(&sa_un, 0, sizeof(sa_un));
 		sa_un.sun_family = AF_UNIX;
 		unix_dir = host ? host : cf_unix_socket_dir;
 		if (!unix_dir || !*unix_dir) {
-			log_error("Unix socket dir not configured: %s", db->name);
+			log_error("unix socket dir not configured: %s", db->name);
 			disconnect_server(server, false, "cannot connect");
 			return;
 		}
 		snprintf(sa_un.sun_path, sizeof(sa_un.sun_path),
 			 "%s/.s.PGSQL.%d", unix_dir, db->port);
+		slog_noise(server, "unix socket: %s", sa_un.sun_path);
 		sa = (struct sockaddr *)&sa_un;
 		sa_len = sizeof(sa_un);
 		res = 1;
@@ -1054,7 +1129,7 @@ bool evict_user_connection(PgUser *user)
 void launch_new_connection(PgPool *pool)
 {
 	PgSocket *server;
-	int total;
+	int max;
 
 	/* allow only small number of connection attempts at a time */
 	if (!statlist_empty(&pool->new_server_list)) {
@@ -1066,57 +1141,58 @@ void launch_new_connection(PgPool *pool)
 	if (pool->last_connect_failed) {
 		usec_t now = get_cached_time();
 		if (now - pool->last_connect_time < cf_server_login_retry) {
-			log_debug("launch_new_connection: last failed, wait");
+			log_debug("launch_new_connection: last failed, not launching new connection yet, still waiting %" PRIu64 " s",
+				  (cf_server_login_retry - (now - pool->last_connect_time)) / USEC);
 			return;
 		}
 	}
 
 	/* is it allowed to add servers? */
-	total = pool_server_count(pool);
-	if (total >= pool->db->pool_size && pool->welcome_msg_ready) {
+	max = pool_server_count(pool);
+	if (max >= pool->db->pool_size && pool->welcome_msg_ready) {
 		/* should we use reserve pool? */
 		if (cf_res_pool_timeout && pool->db->res_pool_size) {
 			usec_t now = get_cached_time();
 			PgSocket *c = first_socket(&pool->waiting_client_list);
 			if (c && (now - c->request_time) >= cf_res_pool_timeout) {
-				if (total < pool->db->pool_size + pool->db->res_pool_size) {
-					slog_warning(c, "Taking connection from reserve_pool");
+				if (max < pool->db->pool_size + pool->db->res_pool_size) {
+					slog_warning(c, "taking connection from reserve_pool");
 					goto allow_new;
 				}
 			}
 		}
 		log_debug("launch_new_connection: pool full (%d >= %d)",
-				total, pool->db->pool_size);
+				max, pool->db->pool_size);
 		return;
 	}
 
 allow_new:
-	total = database_max_connections(pool->db);
-	if (total > 0) {
+	max = database_max_connections(pool->db);
+	if (max > 0) {
 		/* try to evict unused connections first */
-		while (pool->db->connection_count >= total) {
+		while (pool->db->connection_count >= max) {
 			if (!evict_connection(pool->db)) {
 				break;
 			}
 		}
-		if (pool->db->connection_count >= total) {
-			log_debug("launch_new_connection: database full (%d >= %d)",
-					pool->db->connection_count, total);
+		if (pool->db->connection_count >= max) {
+			log_debug("launch_new_connection: database '%s' full (%d >= %d)",
+				  pool->db->name, pool->db->connection_count, max);
 			return;
 		}
 	}
 
-	total = user_max_connections(pool->user);
-	if (total > 0) {
+	max = user_max_connections(pool->user);
+	if (max > 0) {
 		/* try to evict unused connection first */
-		while (pool->user->connection_count >= total) {
+		while (pool->user->connection_count >= max) {
 			if (!evict_user_connection(pool->user)) {
 				break;
 			}
 		}
-		if (pool->user->connection_count >= total) {
-			log_debug("launch_new_connection: user full (%d >= %d)",
-					pool->user->connection_count, total);
+		if (pool->user->connection_count >= max) {
+			log_debug("launch_new_connection: user '%s' full (%d >= %d)",
+				  pool->user->name, pool->user->connection_count, max);
 			return;
 		}
 	}
@@ -1206,6 +1282,8 @@ bool finish_client_login(PgSocket *client)
 		fatal("bad client state");
 	}
 
+	client->wait_for_auth = 0;
+
 	/* check if we know server signature */
 	if (!client->pool->welcome_msg_ready) {
 		log_debug("finish_client_login: no welcome message, pause");
@@ -1263,8 +1341,6 @@ found:
 
 	/* not linked client, just drop it then */
 	if (!main_client->link) {
-		bool res;
-
 		/* let administrative cancel be handled elsewhere */
 		if (main_client->pool->db->admin) {
 			disconnect_client(req, false, "cancel request for console client");
@@ -1274,10 +1350,6 @@ found:
 
 		disconnect_client(req, false, "cancel request for idle client");
 
-		/* notify readiness */
-		SEND_ReadyForQuery(res, main_client);
-		if (!res)
-			disconnect_client(main_client, true, "ReadyForQuery for main_client failed");
 		return;
 	}
 
@@ -1285,8 +1357,16 @@ found:
 	if (!sbuf_close(&req->sbuf))
 		log_noise("sbuf_close failed, retry later");
 
-	/* remember server key */
 	server = main_client->link;
+
+	/* ignore cancel request if the server is setting vars*/
+	if (server->setting_vars) {
+                slog_error(req, "ignore cancel request");
+		disconnect_client(req, false, "don't cancel server during setting vars");
+		return;
+	}
+
+	/* remember server key */
 	memcpy(req->cancel_key, server->cancel_key, 8);
 
 	/* attach to target pool */
@@ -1361,7 +1441,7 @@ bool use_server_socket(int fd, PgAddr *addr,
 	PgSocket *server;
 	PktBuf tmp;
 	bool res;
-	
+
 	/* if the database not found, it's an auto database -> registering... */
 	if (!db) {
 		db = register_auto_database(dbname);
@@ -1371,6 +1451,8 @@ bool use_server_socket(int fd, PgAddr *addr,
 
 	if (db->forced_user) {
 		user = db->forced_user;
+	} else if (cf_auth_type == AUTH_PAM) {
+		user = add_pam_user(username, password);
 	} else {
 		user = find_user(username);
 	}
@@ -1605,3 +1687,41 @@ void reuse_just_freed_objects(void)
 	}
 }
 
+void objects_cleanup(void)
+{
+	struct List *item, *tmp;
+	PgDatabase *db;
+
+	/* close can be postpones, just in case call twice */
+	reuse_just_freed_objects();
+	reuse_just_freed_objects();
+
+	statlist_for_each_safe(item, &autodatabase_idle_list, tmp) {
+		db = container_of(item, PgDatabase, head);
+		kill_database(db);
+	}
+	statlist_for_each_safe(item, &database_list, tmp) {
+		db = container_of(item, PgDatabase, head);
+		kill_database(db);
+	}
+
+	memset(&login_client_list, 0, sizeof login_client_list);
+	memset(&user_list, 0, sizeof user_list);
+	memset(&database_list, 0, sizeof database_list);
+	memset(&pool_list, 0, sizeof pool_list);
+	memset(&user_tree, 0, sizeof user_tree);
+	memset(&autodatabase_idle_list, 0, sizeof autodatabase_idle_list);
+
+	slab_destroy(server_cache);
+	server_cache = NULL;
+	slab_destroy(client_cache);
+	client_cache = NULL;
+	slab_destroy(db_cache);
+	db_cache = NULL;
+	slab_destroy(pool_cache);
+	pool_cache = NULL;
+	slab_destroy(user_cache);
+	user_cache = NULL;
+	slab_destroy(iobuf_cache);
+	iobuf_cache = NULL;
+}

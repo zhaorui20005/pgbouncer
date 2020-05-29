@@ -1,12 +1,12 @@
 /*
  * PgBouncer - Lightweight connection pooler for PostgreSQL.
- * 
+ *
  * Copyright (c) 2007-2009  Marko Kreen, Skype Technologies OÜ
- * 
+ *
  * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
  * copyright notice and this permission notice appear in all copies.
- * 
+ *
  * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
  * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
  * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
@@ -37,7 +37,7 @@
  *	if (more-unparsed)
  *		goto loop;
  *	send_pending();
- */	
+ */
 
 /*
  * 0 .. done_pos         -- sent
@@ -103,44 +103,6 @@ static inline unsigned iobuf_parse_limit(const IOBuf *buf, struct MBuf *mbuf, un
 	return avail;
 }
 
-/* recv */
-static inline int _MUSTCHECK iobuf_recv_limit(IOBuf *io, int fd, unsigned len)
-{
-	uint8_t *pos = io->buf + io->recv_pos;
-	int got;
-	unsigned avail = iobuf_amount_recv(io);
-
-	if (len > avail)
-		len = avail;
-
-	Assert(len > 0);
-
-	got = safe_recv(fd, pos, len, 0);
-	if (got > 0)
-		io->recv_pos += got;
-	return got;
-}
-
-static inline int _MUSTCHECK iobuf_recv_max(IOBuf *io, int fd)
-{
-	return iobuf_recv_limit(io, fd, iobuf_amount_recv(io));
-}
-
-/* send tagged data */
-static inline int _MUSTCHECK iobuf_send_pending(IOBuf *io, int fd)
-{
-	uint8_t *pos = io->buf + io->done_pos;
-	int len, res;
-
-	len = io->parse_pos - io->done_pos;
-	Assert(len > 0);
-
-	res = safe_send(fd, pos, len, 0);
-	if (res > 0)
-		io->done_pos += res;
-	return res;
-}
-
 static inline void iobuf_tag_send(IOBuf *io, unsigned len)
 {
 	Assert(len > 0 && len <= iobuf_amount_parse(io));
@@ -175,4 +137,3 @@ static inline void iobuf_reset(IOBuf *io)
 {
 	io->recv_pos = io->parse_pos = io->done_pos = 0;
 }
-

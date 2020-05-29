@@ -1,6 +1,9 @@
 dnl Process this file with autoconf to produce a configure script.
 
-AC_INIT(pgbouncer, 1.6.1)
+AC_INIT([PgBouncer],
+        [1.13.0],
+        [https://github.com/pgbouncer/pgbouncer/issues], [],
+        [https://www.pgbouncer.org/])
 AC_CONFIG_SRCDIR(src/janitor.c)
 AC_CONFIG_HEADER(lib/usual/config.h)
 AC_PREREQ([2.59])
@@ -13,29 +16,8 @@ AC_USUAL_PROGRAM_CHECK
 
 PKG_PROG_PKG_CONFIG
 
-dnl asciidoc >= 8.4
-AC_CHECK_PROGS(ASCIIDOC, asciidoc)
-if test -n "$ASCIIDOC"; then
-  AC_MSG_CHECKING([for asciidoc version >= 8.4])
-  ver=`$ASCIIDOC --version 2>&1 | sed -e 's/asciidoc //'`
-  case "$ver" in
-dnl hack to make possible to use [, ] in regex
-changequote({, })dnl
-  [0-7].*|8.[0-3]|8.[0-3].*)
-changequote([, ])dnl
-      AC_MSG_RESULT([$ver, too old])
-      ASCIIDOC=""
-      ;;
-  *)
-      AC_MSG_RESULT([$ver, ok])
-      ;;
-  esac
-fi
-
-dnl check for xmlto, but only if asciidoc is found
-if test -n "$ASCIIDOC"; then
-  AC_CHECK_PROGS(XMLTO, xmlto)
-fi
+AC_CHECK_PROGS(PANDOC, pandoc, pandoc)
+AC_CHECK_PROGS(PYTHON, [python python3 python2], python)
 
 dnl check for windows tools
 if test "$PORTNAME" = "win32"; then
@@ -47,7 +29,6 @@ AC_CHECK_TOOL([STRIP], [strip])
 
 dnl Checks for header files.
 AC_USUAL_HEADER_CHECK
-AC_CHECK_HEADERS([crypt.h])
 AC_CHECK_HEADERS([sys/resource.h sys/wait.h])
 
 dnl Checks for typedefs, structures, and compiler characteristics.
@@ -67,39 +48,78 @@ m4_ifdef([AC_TYPE_UINT8_T], [
 
 dnl Checks for library functions.
 AC_USUAL_FUNCTION_CHECK
-AC_SEARCH_LIBS(crypt, crypt)
 AC_SEARCH_LIBS(clock_gettime, rt)
 AC_SEARCH_LIBS(getsockname, socket)
 AC_SEARCH_LIBS(gethostbyname, nsl)
 AC_SEARCH_LIBS(hstrerror, resolv)
-AC_CHECK_FUNCS(crypt lstat)
+AC_CHECK_FUNCS(lstat)
 
 dnl Find libevent
-AC_USUAL_LIBEVENT
+PKG_CHECK_MODULES(LIBEVENT, libevent)
+
+dnl Check for PAM authentication support
+pam_support=no
+AC_ARG_WITH(pam,
+  AC_HELP_STRING([--with-pam], [build with PAM support]),
+  [ PAM=
+    if test "$withval" != no; then
+        have_pthreads=no
+        # Look for PAM header and lib
+        AC_CHECK_HEADERS(security/pam_appl.h, [have_pam_header=t])
+        AC_CHECK_HEADERS(pthread.h, [have_pthreads=yes])
+        AC_SEARCH_LIBS(pam_start, pam, [have_libpam=t])
+        AC_SEARCH_LIBS(pthread_create, pthread, [], [have_pthreads=no])
+        if test x"${have_pthreads}" != xyes; then
+           AC_MSG_ERROR([pthread library should be available for PAM support])
+        fi
+        if test x"${have_pam_header}" != x -a x"${have_libpam}" != x -a x"${have_pthreads}" = xyes; then
+          pam_support=yes
+          AC_DEFINE(HAVE_PAM, 1, [PAM support])
+        fi
+    fi
+  ], [])
+
+dnl Check for systemd support
+AC_MSG_CHECKING([whether to build with systemd support])
+AC_ARG_WITH(systemd,
+            [AC_HELP_STRING([--with-systemd], [Build with systemd support])],
+            [if test "$withval" != no; then with_systemd=yes; else with_systemd=no; fi],
+            [with_systemd=no])
+AC_MSG_RESULT([$with_systemd])
+AC_SUBST(with_systemd)[]dnl
+if test "$with_systemd" = yes; then
+  AC_DEFINE([USE_SYSTEMD], 1, [Define to build with systemd support. (--with-systemd)])
+  AC_CHECK_HEADER(systemd/sd-daemon.h, [], [AC_MSG_ERROR([header file <systemd/sd-daemon.h> is required for systemd support])])
+  AC_SEARCH_LIBS(sd_notify, systemd)
+fi
 
 ##
 ## DNS backend
 ##
 
 # make sure all vars are set
-use_cares=auto
+use_cares=no
 use_udns=no
 use_evdns=no
 
 dnl Find c-ares
 AC_MSG_CHECKING([whether to use c-ares for DNS lookups])
 AC_ARG_WITH(cares,
-  AC_HELP_STRING([--with-cares=prefix],[Specify where c-ares is installed]),
+  AC_HELP_STRING([--with-cares@<:@=PREFIX@:>@], [build with c-ares support]),
   [ if test "$withval" = "no"; then
       use_cares=no
     elif test "$withval" = "yes"; then
-      use_cares=yes
+      use_cares="$withval"
+      CARES_CFLAGS=""
+      CARES_LIBS="-lcares"
+    elif test "$withval" = "auto"; then
+      use_cares="$withval"
     else
       use_cares=yes
       CARES_CFLAGS="-I$withval/include"
       CARES_LIBS="-L$withval/lib -lcares"
     fi
-  ], [])
+  ], [use_cares=auto])
 AC_MSG_RESULT([$use_cares])
 
 if test "$use_cares" = "auto"; then
@@ -117,12 +137,13 @@ if test "$use_cares" = "yes"; then
   AC_CHECK_FUNCS(ares_parse_soa_reply)
   LIBS="$tmp_LIBS"
   CFLAGS="$tmp_CFLAGS"
-else
+
+else # !cares
 
 dnl Find libudns
 AC_MSG_CHECKING([whether to use libudns])
 AC_ARG_WITH(udns,
-  AC_HELP_STRING([--with-udns=prefix],[Specify where udns is installed]),
+  AC_HELP_STRING([--with-udns@<:@=PREFIX@:>@], [build with udns support]),
   [ if test "$withval" = "no"; then
       use_udns=no
     elif test "$withval" = "yes"; then
@@ -154,14 +175,9 @@ if test "$use_udns" = "yes"; then
 
 else # !udns
 
-dnl On libevent 2.x use evdns by default
-if test "$ac_cv_func_evdns_base_new" = "yes"; then
-  use_evdns=yes
-fi
-
 dnl Allow user to override the decision
-AC_ARG_ENABLE(evdns, AC_HELP_STRING([--enable-evdns],[Use libevent for DNS lookups (default on libevent 2.x)]),
-              [use_evdns=$enableval])
+AC_ARG_ENABLE(evdns, AC_HELP_STRING([--disable-evdns], [do not use libevent for DNS lookups]),
+              [use_evdns=$enableval], [use_evdns=yes])
 AC_MSG_CHECKING([whether to use libevent for DNS lookups])
 if test "$use_evdns" = "yes"; then
   AC_DEFINE(USE_EVDNS, 1, [Use libevent for DNS lookups.])
@@ -181,6 +197,8 @@ fi # !cares
 
 ## end of DNS
 
+AC_USUAL_TLS
+
 AC_USUAL_DEBUG
 AC_USUAL_CASSERT
 AC_USUAL_WERROR
@@ -195,8 +213,20 @@ test -f Makefile || {
 }
 
 echo ""
-echo "Results"
-echo "  c-ares = $use_cares"
-echo "  evdns = $use_evdns"
-echo "  udns = $use_udns"
+echo "Results:"
+dnl Note: Report here should match selection in src/dnslookup.c
+if test "$use_cares" = "yes"; then
+  echo "  adns    = c-ares"
+elif test "$use_udns" = "yes"; then
+  echo "  adns    = udns"
+elif test "$use_evdns" = "yes"; then
+  echo "  adns    = evdns2"
+elif test "$ac_cv_usual_glibc_gaia" = "yes"; then
+  echo "  adns    = libc"
+else
+  echo "  adns    = compat"
+fi
+echo "  pam     = $pam_support"
+echo "  systemd = $with_systemd"
+echo "  tls     = $tls_support"
 echo ""

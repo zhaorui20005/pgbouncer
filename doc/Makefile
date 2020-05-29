@@ -1,48 +1,34 @@
 -include ../config.mak
 
-web = pgf:/home/pgfoundry.org/groups/pgbouncer/htdocs/
-
 manpages = pgbouncer.1 pgbouncer.5
 
-EXTRA_DIST = config.txt usage.txt todo.txt faq.txt Makefile $(manpages)
-
-htmls = config.html usage.html todo.html faq.html README.html
-
-ifeq ($(ASCIIDOC),)
-ifneq ($(wildcard pgbouncer.[15]),)
-# no asciidoc, but we have manpages
 dist_man_MANS = $(manpages)
-endif
-else
-# we have asciidoc, build everything
-dist_man_MANS = $(manpages)
-doc_DATA = $(htmls)
-endif
+
+EXTRA_DIST = config.md usage.md Makefile $(manpages) \
+	     frag-config-man.md frag-usage-man.md \
+	     filter.py
+
+CLEANFILES = pgbouncer_1.md pgbouncer_5.md
+
+# make maintainer-clean removes those
+MAINTAINERCLEANFILES = $(manpages)
 
 SUBLOC = doc
 abs_top_srcdir ?= $(CURDIR)/..
 include $(abs_top_srcdir)/lib/mk/antimake.mk
 
-# add rules only if asciidoc is defined
-ifneq ($(ASCIIDOC),)
+export PACKAGE_VERSION
 
-pgbouncer.1: usage.xml
-	$(XMLTO) man $<
+pgbouncer.%: pgbouncer_%.md
+	$(PANDOC) -s -t man -o $@ $<
 
-pgbouncer.5: config.xml
-	$(XMLTO) man $<
+pgbouncer_1.md: filter.py frag-usage-man.md usage.md
+	$(PYTHON) $^ >$@
 
-%.xml: %.txt
-	$(ASCIIDOC) -b docbook -d manpage -o $@ $<
+pgbouncer_5.md: filter.py frag-config-man.md config.md
+	$(PYTHON) $^ >$@
 
-%.html: %.txt
-	$(ASCIIDOC) -a toc -o $@ $<
+.INTERMEDIATE: pgbouncer_1.md pgbouncer_5.md
 
-README.html: ../README
-	$(ASCIIDOC) -a toc -o $@ $<
-
-web: $(doc_DATA)
-	rsync -av $(htmls) $(web)/doc/
-
-endif # ASCIIDOC
-
+web:
+	$(MAKE) -C ../../pgbouncer.github.io

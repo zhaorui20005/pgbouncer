@@ -1,12 +1,12 @@
 /*
  * PgBouncer - Lightweight connection pooler for PostgreSQL.
- * 
+ *
  * Copyright (c) 2007-2009  Marko Kreen, Skype Technologies OÜ
- * 
+ *
  * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
  * copyright notice and this permission notice appear in all copies.
- * 
+ *
  * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
  * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
  * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
@@ -17,14 +17,10 @@
  */
 
 /*
- * Config and pg_auth file reading.
+ * Config and auth file reading.
  */
 
 #include "bouncer.h"
-
-#ifdef HAVE_NETDB_H
-#include <netdb.h>
-#endif
 
 #include <usual/fileutil.h>
 
@@ -193,7 +189,7 @@ bool parse_database(void *base, const char *name, const char *connstr)
 	char *port = "5432";
 	char *username = NULL;
 	char *password = "";
-	char *auth_username = NULL;
+	char *auth_username = cf_auth_user;
 	char *client_encoding = NULL;
 	char *datestyle = NULL;
 	char *timezone = NULL;
@@ -341,7 +337,7 @@ bool parse_database(void *base, const char *name, const char *connstr)
 	} else {
 		msg = pktbuf_dynamic(128);
 		if (!msg)
-			fatal("cannot allocate startup buf");
+			die("out of memory");
 		db->startup_params = msg;
 	}
 
@@ -378,7 +374,7 @@ bool parse_database(void *base, const char *name, const char *connstr)
 		db->auth_user = NULL;
 	}
 
-	/* if user is forces, create fake object for it */
+	/* if user is forced, create fake object for it */
 	if (username != NULL) {
 		if (!force_user(db, username, password))
 			log_warning("db setup failed, trying to continue");
@@ -500,19 +496,21 @@ static void unquote_add_user(const char *username, const char *password)
 
 static bool auth_loaded(const char *fn)
 {
+	static bool cache_set = false;
 	static struct stat cache;
 	struct stat cur;
 
-	/* hack for resetting */
+	/* no file specified */
 	if (fn == NULL) {
 		memset(&cache, 0, sizeof(cache));
+		cache_set = true;
 		return false;
 	}
 
 	if (stat(fn, &cur) < 0)
-		return false;
+		memset(&cur, 0, sizeof(cur));
 
-	if (cache.st_dev == cur.st_dev
+	if (cache_set && cache.st_dev == cur.st_dev
 	&& cache.st_ino == cur.st_ino
 	&& cache.st_mode == cur.st_mode
 	&& cache.st_uid == cur.st_uid
@@ -521,6 +519,7 @@ static bool auth_loaded(const char *fn)
 	&& cache.st_size == cur.st_size)
 		return true;
 	cache = cur;
+	cache_set = true;
 	return false;
 }
 
@@ -543,16 +542,19 @@ static void disable_users(void)
 	}
 }
 
-/* load list of users from pg_auth/pg_psw file */
+/* load list of users from auth_file */
 bool load_auth_file(const char *fn)
 {
 	char *user, *password, *buf, *p;
 
+	/* No file to load? */
+	if (fn == NULL)
+		return NULL;
+
 	buf = load_file(fn, NULL);
 	if (buf == NULL) {
-		/* reset file info */
-		auth_loaded(NULL);
-		return false;
+		log_error("could not open auth_file %s: %s", fn, strerror(errno));
+		return NULL;
 	}
 
 	log_debug("loading auth_file: \"%s\"", fn);
@@ -583,11 +585,11 @@ bool load_auth_file(const char *fn)
 			break;
 		}
 		if (p - user >= MAX_USERNAME) {
-			log_error("username too long");
+			log_error("username too long in auth file");
 			break;
 		}
 		*p++ = 0; /* tag username end */
-		
+
 		/* get password */
 		p = find_quote(p, true);
 		if (*p != '"') {
@@ -601,7 +603,7 @@ bool load_auth_file(const char *fn)
 			break;
 		}
 		if (p - password >= MAX_PASSWORD) {
-			log_error("too long password");
+			log_error("password too long in auth file");
 			break;
 		}
 		*p++ = 0; /* tag password end */
@@ -616,4 +618,3 @@ bool load_auth_file(const char *fn)
 
 	return true;
 }
-

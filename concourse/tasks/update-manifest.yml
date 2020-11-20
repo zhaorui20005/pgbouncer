@@ -1,0 +1,28 @@
+platform: linux
+image_resource:
+  type: docker-image
+inputs:
+- name: pgbouncer_src
+- name: gpdb_release
+outputs:
+- name: gpdb_release_output
+run:
+  path: "sh"
+  args:
+  - -c
+  - |
+    set -euxo pipefail
+    pushd pgbouncer_src
+        VERSION=`git describe --tags`
+    popd
+    yum -y install jq
+    git clone gpdb_release gpdb_release_output
+    cd gpdb_release_output
+    cat components/component_manifest.json | jq "(.platforms[].components[] | select(.name==\"pgbouncer\").version) = \"${VERSION}\"" > /tmp/component_manifest.json
+    mv /tmp/component_manifest.json components/component_manifest.json
+    if [ ! -z "$(git diff)" ]; then
+        git add components/component_manifest.json
+        git config user.email "pgbouncer_bot@example.com"
+        git config user.name "pgbouncer_BOT"
+        git commit -m "Updating manifest for pgbouncer version ${VERSION}"
+    fi

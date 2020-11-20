@@ -1,0 +1,15 @@
+platform: linux
+image_resource:
+  type: docker-image
+inputs:
+  - name: bin_pgbouncer
+  - name: pgbouncer_src
+params:
+  TARGET_OS:
+  GPDB_MAJOR_VERSION:
+  PLATFORM:
+  ARCH:
+outputs:
+  - name: component_pgbouncer
+run:
+  path: pgbouncer_src/concourse/scripts/package_pgbouncer.bash

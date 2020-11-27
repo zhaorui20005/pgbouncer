@@ -8,7 +8,7 @@ source "${CWDIR}/common.bash"
 
 function setup_gpdb_cluster() {
     export TEST_OS=centos
-    export PGPORT=15432
+    #export PGPORT=15432
     export CONFIGURE_FLAGS=" --with-openssl"
     if [ ! -f "bin_gpdb/bin_gpdb.tar.gz" ];then
         mv bin_gpdb/*.tar.gz bin_gpdb/bin_gpdb.tar.gz
@@ -29,15 +29,15 @@ function setup_gpdb_cluster() {
 }
 
 function _main(){
-    yum install -y sudo
+    #yum install -y sudo
     setup_gpdb_cluster
     chown -R gpadmin:gpadmin pgbouncer_src
     echo "gpadmin ALL=(ALL)       NOPASSWD: ALL" >> /etc/sudoers
+	cp bin_pgbouncer/bin/pgbouncer pgbouncer_src/
     cd pgbouncer_src/test
-    su  gpadmin -c "./test.sh"
-    su  gpadmin -c "make all"
-    cd ssl
+    #su  gpadmin -c "make all"
     su gpadmin -c "./test.sh"
+    su gpadmin -c "./ssl/test.sh"
 }
 
 _main "$@"

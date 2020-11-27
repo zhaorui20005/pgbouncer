@@ -1,4 +1,4 @@
-#! /bin/sh
+#! /bin/bash
 
 cd $(dirname $0)
 
@@ -117,7 +117,7 @@ reconf_bouncer() {
 	done
 	test -f test.pid && kill `cat test.pid`
 	sleep 1
-	$BOUNCER_EXE -v -d tmp/test.ini
+	$BOUNCER_EXE -v -v -v -d tmp/test.ini
 }
 
 reconf_pgsql() {
@@ -292,6 +292,7 @@ test_client_ssl_scram() {
 
 	reconf_bouncer "auth_type = scram-sha-256" "server_tls_sslmode = prefer" \
 		"client_tls_sslmode = require" \
+		"client_tls_ca_file = TestCA1/ca.crt" \
 		"client_tls_key_file = TestCA1/sites/01-localhost.key" \
 		"client_tls_cert_file = TestCA1/sites/01-localhost.crt"
 	reconf_pgsql "ssl=on" "ssl_ca_file='root.crt'"

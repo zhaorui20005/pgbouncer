@@ -2,8 +2,9 @@
 
 set -ex
 export HOME_DIR=$PWD
-CWDIR=$HOME_DIR/gpdb_src/concourse/scripts/
-source "${CWDIR}/common.bash"
+# common.bash set up the compile enviroment
+#CWDIR=$HOME_DIR/gpdb_src/concourse/scripts/
+#source "${CWDIR}/common.bash"
 
 function build_pgbouncer() {
     pushd pgbouncer_src

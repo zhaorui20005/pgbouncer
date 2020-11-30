@@ -48,7 +48,7 @@ resources:
     ignore_paths:
     - gpdb-doc/*
     - README*
-## FIXME: rename master to gpdb7
+
 - name: bin_gpdb7_centos7
   type: gcs
   source:
@@ -59,31 +59,29 @@ resources:
 - name: bin_gpdb7_ubuntu18.04
   type: gcs
   source:
-    bucket: {{gpdb6-bin-bucket-name}}
+    bucket: {{gcs-bucket}}
     json_key: {{concourse-gcs-resources-service-account-key}}
     regexp: server/published/master/server-rc-(.*)-ubuntu18.04_x86_64.tar.gz
 
-## FIXME: rename to pgbouncer-bucket
-- name: bin_pgbouncer_gpdb7_centos7
+- name: bin_pgbouncer_centos7
   type: s3
   source:
     access_key_id: {{bucket-access-key-id}}
-    bucket: {{gpss-bucket}}
+    bucket: {{pgbouncer-bucket}}
     region_name: {{aws-region}}
     secret_access_key: {{bucket-secret-access-key}}
-    versioned_file: intermediates/components_pgbouncer/gpdb7-centos7/bin_pgbouncer.tar.gz
+    versioned_file: intermediates/components_pgbouncer/centos7/bin_pgbouncer.tar.gz
 
-## FIXME: rename to pgbouncer-bucket
-- name: bin_pgbouncer_gpdb7_ubuntu18.04
+- name: bin_pgbouncer_ubuntu18.04
   type: s3
   source:
     access_key_id: {{bucket-access-key-id}}
-    bucket: {{gpss-bucket}}
+    bucket: {{pgbouncer-bucket}}
     region_name: {{aws-region}}
     secret_access_key: {{bucket-secret-access-key}}
-    versioned_file: intermediates/components_pgbouncer/gpdb7-ubuntu18.04/bin_pgbouncer.tar.gz
+    versioned_file: intermediates/components_pgbouncer/ubuntu18.04/bin_pgbouncer.tar.gz
 
-- name: component_pgbouncer_gpdb7_centos7
+- name: component_pgbouncer_centos7
   type: gcs
   source:
     access_key_id: {{bucket-access-key-id}}
@@ -92,7 +90,7 @@ resources:
     json_key: {{concourse-gcs-resources-service-account-key}}
     regexp: clients/published/gpdb7/pgbouncer-(.*)-rhel6_x86_64.tar.gz
 
-- name: component_pgbouncer_gpdb7_ubuntu18.04
+- name: component_pgbouncer_ubuntu18.04
   type: gcs
   source:
     access_key_id: {{bucket-access-key-id}}
@@ -101,42 +99,47 @@ resources:
     json_key: {{concourse-gcs-resources-service-account-key}}
     regexp: clients/published/gpdb7/pgbouncer-(.*)-ubuntu18.04_x86_64.tar.gz
 
-- name: gpdb7_release
-  type: git
-  source:
-    branch: {{gpdb7-release-branch}}
-    private_key: {{gpdb-release-remote-deploy-key}}
-    uri: {{gpdb-release-git-remote}}
-
 jobs:
-- name: test_pgbouncer_gpdb7_centos7
+- name: build_pgbouncer_centos7
   plan:
   - in_parallel:
       steps:
       - get: pgbouncer_src
         trigger: true
       - get: gpdb7-centos7-build
-      - get: gpdb7-centos7-test
-      - get: gpdb7_src
-      - get: bin_gpdb
-        resource: bin_gpdb7_centos7
   - task: build_pgbouncer
-    input_mapping:
-      gpdb_src: gpdb7_src
     config:
       platform: linux
       inputs:
       - name: pgbouncer_src
-      - name: gpdb_src
       outputs:
       - name: bin_pgbouncer
       run:
         path: pgbouncer_src/concourse/scripts/build.bash
     image: gpdb7-centos7-build
     timeout: 30m
+  - put: bin_pgbouncer
+    resource: bin_pgbouncer_centos7
+    params:
+      file: bin_pgbouncer/bin_pgbouncer.tar.gz
+- name: test_pgbouncer_gpdb7_centos7
+  plan:
+  - in_parallel:
+      steps:
+      - get: pgbouncer_src
+      - get: gpdb7-centos7-build
+      - get: gpdb7-centos7-test
+      - get: gpdb7_src
+      - get: bin_gpdb
+        resource: bin_gpdb7_centos7
+      - get: bin_pgbouncer_centos7
+        passed:
+        - build_pgbouncer_centos7
+        trigger: true
   - task: psql_test
     input_mapping:
       gpdb_src: gpdb7_src
+      bin_pgbouncer: bin_pgbouncer_centos7
     config:
       platform: linux
       inputs:
@@ -148,38 +151,48 @@ jobs:
         path: pgbouncer_src/concourse/scripts/psql_test.bash
     image: gpdb7-centos7-test
     timeout: 30m
-  - put: bin_pgbouncer
-    resource: bin_pgbouncer_gpdb7_centos7
-    params:
-      file: bin_pgbouncer/bin_pgbouncer.tar.gz
-- name: test_pgbouncer_gpdb7_ubuntu18.04
+
+- name: build_pgbouncer_ubuntu18.04
   plan:
   - in_parallel:
       steps:
       - get: pgbouncer_src
         trigger: true
       - get: gpdb7-ubuntu18.04-build
-      - get: gpdb7-ubuntu18.04-test
-      - get: gpdb7_src
-      - get: bin_gpdb
-        resource: bin_gpdb7_ubuntu18.04
   - task: build_pgbouncer
-    input_mapping:
-      gpdb_src: gpdb7_src
     config:
       platform: linux
       inputs:
       - name: pgbouncer_src
-      - name: gpdb_src
       outputs:
       - name: bin_pgbouncer
       run:
         path: pgbouncer_src/concourse/scripts/build.bash
     image: gpdb7-ubuntu18.04-build
     timeout: 30m
+  - put: bin_pgbouncer
+    resource: bin_pgbouncer_ubuntu18.04
+    params:
+      file: bin_pgbouncer/bin_pgbouncer.tar.gz
+
+- name: test_pgbouncer_gpdb7_ubuntu18.04
+  plan:
+  - in_parallel:
+      steps:
+      - get: pgbouncer_src
+      - get: gpdb7-ubuntu18.04-build
+      - get: gpdb7-ubuntu18.04-test
+      - get: gpdb7_src
+      - get: bin_gpdb
+        resource: bin_gpdb7_ubuntu18.04
+      - get: bin_pgbouncer_ubuntu18.04
+        passed:
+        - build_pgbouncer_ubuntu18.04
+        trigger: true
   - task: psql_test
     input_mapping:
       gpdb_src: gpdb7_src
+      bin_pgbouncer: bin_pgbouncer_ubuntu18.04
     config:
       platform: linux
       inputs:
@@ -191,18 +204,14 @@ jobs:
         path: pgbouncer_src/concourse/scripts/psql_test.bash
     image: gpdb7-ubuntu18.04-test
     timeout: 30m
-  - put: bin_pgbouncer
-    resource: bin_pgbouncer_gpdb7_ubuntu18.04
-    params:
-      file: bin_pgbouncer/bin_pgbouncer.tar.gz
 - name: gate_test_pgbouncer_gpdb7
   plan:
   - in_parallel:
       steps:
-      - get: bin_pgbouncer_gpdb7_centos7
+      - get: bin_pgbouncer_centos7
         passed:
         - test_pgbouncer_gpdb7_centos7
-      - get: bin_pgbouncer_gpdb7_ubuntu18.04
+      - get: bin_pgbouncer_ubuntu18.04
         passed:
         - test_pgbouncer_gpdb7_ubuntu18.04
       - get: pgbouncer_src
@@ -210,17 +219,17 @@ jobs:
         - test_pgbouncer_gpdb7_centos7
         - test_pgbouncer_gpdb7_ubuntu18.04
         trigger: true
-- name: package_pgbouncer_gpdb7_centos7
+- name: package_pgbouncer_centos7
   plan:
   - get: pgbouncer_src
-  - get: bin_pgbouncer_gpdb7_centos7
+  - get: bin_pgbouncer_centos7
     passed:
     - gate_test_pgbouncer_gpdb7
     trigger: true
   - get: gpdb7-centos7-test
-  - task: package_pgbouncer_gpdb7_centos7
+  - task: package_pgbouncer_centos7
     input_mapping:
-      bin_pgbouncer: bin_pgbouncer_gpdb7_centos7
+      bin_pgbouncer: bin_pgbouncer_centos7
     file: pgbouncer_src/concourse/tasks/package_pgbouncer.yml
     params:
       GPDB_MAJOR_VERSION: gpdb7
@@ -229,20 +238,20 @@ jobs:
       ARCH: x86_64
     image: gpdb7-centos7-test
     timeout: 30m
-  - put: component_pgbouncer_gpdb7_centos7
+  - put: component_pgbouncer_centos7
     params:
       file: component_pgbouncer/pgbouncer-*.tar.gz
-- name: package_pgbouncer_gpdb7_ubuntu18.04
+- name: package_pgbouncer_ubuntu18.04
   plan:
   - get: pgbouncer_src
-  - get: bin_pgbouncer_gpdb7_ubuntu18.04
+  - get: bin_pgbouncer_ubuntu18.04
     passed:
     - gate_test_pgbouncer_gpdb7
     trigger: true
   - get: gpdb7-ubuntu18.04-test
-  - task: package_pgbouncer_gpdb7_ubuntu18.04
+  - task: package_pgbouncer_ubuntu18.04
     input_mapping:
-      bin_pgbouncer: bin_pgbouncer_gpdb7_ubuntu18.04
+      bin_pgbouncer: bin_pgbouncer_ubuntu18.04
     file: pgbouncer_src/concourse/tasks/package_pgbouncer.yml
     params:
       GPDB_MAJOR_VERSION: gpdb7
@@ -251,30 +260,30 @@ jobs:
       ARCH: x86_64
     image: gpdb7-ubuntu18.04-test
     timeout: 30m
-  - put: component_pgbouncer_gpdb7_ubuntu18.04
+  - put: component_pgbouncer_ubuntu18.04
     params:
       file: component_pgbouncer/pgbouncer-*.tar.gz
 - name: gate_package_pgbouncer_gpdb7
   plan:
   - in_parallel:
       steps:
-      - get: component_pgbouncer_gpdb7_centos7
+      - get: component_pgbouncer_centos7
         passed:
         - package_pgbouncer_gpdb7_centos7
-      - get: component_pgbouncer_gpdb7_ubuntu18.04
+      - get: component_pgbouncer_ubuntu18.04
         passed:
-        - package_pgbouncer_gpdb7_ubuntu18.04
+        - package_pgbouncer_ubuntu18.04
       - get: pgbouncer_src
         passed:
         - package_pgbouncer_gpdb7_centos7
-        - package_pgbouncer_gpdb7_ubuntu18.04
+        - package_pgbouncer_ubuntu18.04
         trigger: true
 - name: update_manifest_gpdb7
   plan:
   - in_parallel:
       steps:
       - get: pgbouncer_src
-      - get: component_pgbouncer_gpdb7_centos7
+      - get: component_pgbouncer_centos7
         passed:
         - gate_package_pgbouncer_gpdb7
       - get: gpdb_release

@@ -108,7 +108,6 @@ jobs:
   - in_parallel:
       steps:
       - get: pgbouncer_src
-      - get: gpdb7-centos7-build
       - get: gpdb7-centos7-test
       - get: gpdb7_src
       - get: bin_gpdb
@@ -161,7 +160,6 @@ jobs:
   - in_parallel:
       steps:
       - get: pgbouncer_src
-      - get: gpdb7-ubuntu18.04-build
       - get: gpdb7-ubuntu18.04-test
       - get: gpdb7_src
       - get: bin_gpdb

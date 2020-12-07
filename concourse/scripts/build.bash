@@ -19,8 +19,8 @@ function build_pgbouncer() {
 
 function _main() {
     build_pgbouncer
-	pushd bin_pgbouncer
-	tar -czf bin_pgbouncer.tar.gz *
+    pushd bin_pgbouncer
+    tar -czf bin_pgbouncer.tar.gz *
 }
 
 _main "$@"

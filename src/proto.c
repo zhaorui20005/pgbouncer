@@ -275,7 +275,10 @@ static bool login_clear_psw(PgSocket *server)
 {
 	PgUser *user = get_srv_psw(server);
 	slog_debug(server, "P: send clear password");
-	return send_password(server, user->passwd);
+	if (get_password_type(user->passwd) != PASSWORD_TYPE_SHA256)
+		return send_password(server, user->passwd);
+	else
+		return send_password(server, user->raw_passwd);
 }
 
 static bool login_md5_psw(PgSocket *server, const uint8_t *salt)
@@ -293,6 +296,12 @@ static bool login_md5_psw(PgSocket *server, const uint8_t *salt)
 	case PASSWORD_TYPE_MD5:
 		src = user->passwd + 3;
 		break;
+	case PASSWORD_TYPE_SHA256:
+		/* Keep the same error msg with gpdb */
+		slog_error(server, "MD5 authentication is not supported with SHA256 hashed passwords");
+		kill_pool_logins(server->pool, "server login failed: "
+			"MD5 authentication is not supported with SHA256 hashed passwords");
+		return false;
 	default:
 		slog_error(server, "cannot do MD5 authentication: wrong password type");
 		kill_pool_logins(server->pool, "server login failed: wrong password type");

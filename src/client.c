@@ -38,6 +38,7 @@ static const char *hdr2hex(const struct MBuf *data, char *buf, unsigned buflen)
 static bool check_client_passwd(PgSocket *client, const char *passwd)
 {
 	char md5[MD5_PASSWD_LEN + 1];
+	char sha256[SHA256_PASSWD_LEN + 1];
 	PgUser *user = client->auth_user;
 	int auth_type = client->client_auth_type;
 
@@ -53,6 +54,14 @@ static bool check_client_passwd(PgSocket *client, const char *passwd)
 		case PASSWORD_TYPE_MD5:
 			pg_md5_encrypt(passwd, user->name, strlen(user->name), md5);
 			return strcmp(user->passwd, md5) == 0;
+		case PASSWORD_TYPE_SHA256:
+			pg_sha256_encrypt(passwd, user->name, strlen(user->name), sha256);
+			if(strcmp(user->passwd, sha256) == 0) {
+				snprintf(user->raw_passwd, sizeof(user->raw_passwd), "%s", passwd);
+				return true;
+			} else {
+				return false;
+			}
 		case PASSWORD_TYPE_SCRAM_SHA_256:
 			return scram_verify_plain_password(client, user->name, passwd, user->passwd);
 		default:
@@ -215,6 +224,8 @@ static bool finish_set_pool(PgSocket *client, bool takeover)
 	{
 		if (get_password_type(client->auth_user->passwd) == PASSWORD_TYPE_SCRAM_SHA_256)
 			auth = AUTH_SCRAM_SHA_256;
+		else if (get_password_type(client->auth_user->passwd) == PASSWORD_TYPE_SHA256)
+			auth = AUTH_PLAIN;
 	}
 
 	/* remember method */
@@ -545,6 +556,9 @@ static bool scram_client_first(PgSocket *client, uint32_t datalen, const uint8_t
 	switch (get_password_type(user->passwd)) {
 	case PASSWORD_TYPE_MD5:
 		slog_error(client, "SCRAM authentication failed: user has MD5 secret");
+		goto failed;
+	case PASSWORD_TYPE_SHA256:
+		slog_error(client, "SCRAM authentication failed: user has SHA256 secret");
 		goto failed;
 	case PASSWORD_TYPE_PLAINTEXT:
 	case PASSWORD_TYPE_SCRAM_SHA_256:

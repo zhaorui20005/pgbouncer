@@ -24,6 +24,7 @@
 
 #include <usual/crypto/md5.h>
 #include <usual/crypto/csrandom.h>
+#include <usual/crypto/sha256.h>
 
 int log_socket_prefix(enum LogLevel lev, void *ctx, char *dst, unsigned int dstlen)
 {
@@ -87,6 +88,10 @@ static void hash2hex(const uint8_t *hash, char *dst)
 {
 	bin2hex(hash, MD5_DIGEST_LENGTH, dst, 16*2+1);
 }
+static void hash2hex_sha256(const uint8_t *hash, char *dst)
+{
+	bin2hex(hash, SHA256_DIGEST_LENGTH, dst, SHA256_DIGEST_LENGTH*2+1);
+}
 
 void pg_md5_encrypt(const char *part1,
 		    const char *part2, size_t part2len,
@@ -102,6 +107,19 @@ void pg_md5_encrypt(const char *part1,
 
 	memcpy(dest, "md5", 3);
 	hash2hex(hash, dest + 3);
+}
+void pg_sha256_encrypt(const char *part1, const char *part2, size_t part2len, char *dest)
+{
+	struct sha256_ctx ctx;
+	uint8_t hash[SHA256_DIGEST_LENGTH];
+
+	sha256_reset(&ctx);
+	sha256_update(&ctx, part1, strlen(part1));
+	sha256_update(&ctx, part2, part2len);
+	sha256_final(&ctx, hash);
+
+	memcpy(dest, SHA256_PREFIX, strlen(SHA256_PREFIX));
+	hash2hex_sha256(hash, dest + strlen(SHA256_PREFIX));
 }
 
 /* wrapped for getting random bytes */

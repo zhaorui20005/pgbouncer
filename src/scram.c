@@ -277,6 +277,10 @@ get_password_type(const char *shadow_pass)
 	    strlen(shadow_pass) == MD5_PASSWD_LEN &&
 	    strspn(shadow_pass + 3, MD5_PASSWD_CHARSET) == MD5_PASSWD_LEN - 3)
 		return PASSWORD_TYPE_MD5;
+	if (strncmp(shadow_pass, SHA256_PREFIX, strlen(SHA256_PREFIX)) == 0 &&
+	    strlen(shadow_pass) == SHA256_PASSWD_LEN &&
+	    strspn(shadow_pass + strlen(SHA256_PREFIX), MD5_PASSWD_CHARSET) == SHA256_PASSWD_LEN - strlen(SHA256_PREFIX))
+		return PASSWORD_TYPE_SHA256;
 	if (parse_scram_verifier(shadow_pass, &iterations, &encoded_salt,
 				 stored_key, server_key)) {
 		free(encoded_salt);

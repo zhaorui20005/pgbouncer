@@ -27,8 +27,8 @@ resources:
 - name: centos-gpdb-dev-7
   type: registry-image
   source:
-    repository: gcr.io/data-gpdb-public-images/centos-gpdb-dev
-    tag: '7-gcc6.2-llvm3.7'
+    repository: gcr.io/data-gpdb-public-images/gpdb5-centos7-build-test
+    tag: latest
 
 - name: gpdb5_src
   type: git

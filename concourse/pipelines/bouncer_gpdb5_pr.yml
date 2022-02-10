@@ -85,12 +85,13 @@ jobs:
     timeout: 30m
   - task: psql_test
     input_mapping:
-      pgbouncer_src: pgbouncer_bin
+      pgbouncer_src: pgbouncer_pr
       gpdb_src: gpdb5_src
     config:
       platform: linux
       inputs:
       - name: pgbouncer_src
+      - name: pgbouncer_bin
       - name: gpdb_src
       - name: bin_gpdb
       run:

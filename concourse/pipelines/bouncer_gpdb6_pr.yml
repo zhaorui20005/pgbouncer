@@ -24,7 +24,7 @@ resources:
       - README*
 
 - name: gpdb6-centos7-test
-  type: docker-image
+  type: registry-image
   source:
     repository: gcr.io/data-gpdb-public-images/gpdb6-centos7-test
     tag: latest
@@ -70,7 +70,7 @@ jobs:
       - name: pgbouncer_src
       - name: gpdb_src
       outputs:
-      - name: pgbouncer_bin
+      - name: bin_pgbouncer
       run:
         path: pgbouncer_src/concourse/scripts/build.bash
     image: gpdb6-centos7-test
@@ -82,7 +82,7 @@ jobs:
     timeout: 30m
   - task: psql_test
     input_mapping:
-      pgbouncer_src: pgbouncer_bin
+      pgbouncer_src: pgbouncer_pr
       gpdb_src: gpdb6_src
     config:
       platform: linux
@@ -90,6 +90,7 @@ jobs:
       - name: pgbouncer_src
       - name: gpdb_src
       - name: bin_gpdb
+      - name: bin_pgbouncer
       run:
         path: pgbouncer_src/concourse/scripts/psql_test.bash
     image: gpdb6-centos7-test

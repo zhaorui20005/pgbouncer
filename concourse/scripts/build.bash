@@ -15,12 +15,17 @@ function build_pgbouncer() {
     make install
     popd
 }
+function build_hba_test() {
+    pushd pgbouncer_src/test
+    make all
+    popd
+}
 
 
 function _main() {
     build_pgbouncer
-    pushd bin_pgbouncer
-    tar -czf bin_pgbouncer.tar.gz *
+    build_hba_test
+    cp -rf pgbouncer_src/* pgbouncer_compiled
 }
 
 _main "$@"

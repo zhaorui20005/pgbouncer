@@ -33,14 +33,8 @@ function _main(){
     setup_gpdb_cluster
     chown -R gpadmin:gpadmin pgbouncer_src
     echo "gpadmin ALL=(ALL)       NOPASSWD: ALL" >> /etc/sudoers
-    pushd bin_pgbouncer
-    tar -zxf bin_pgbouncer.tar.gz
-    popd
-    cp bin_pgbouncer/bin/pgbouncer pgbouncer_src/
     cd pgbouncer_src/test
-    #su  gpadmin -c "make all"
-    su gpadmin -c "./test.sh"
-    su gpadmin -c "./ssl/test.sh"
+    su gpadmin -c "make check"
 }
 
 _main "$@"

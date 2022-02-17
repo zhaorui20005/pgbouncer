@@ -111,7 +111,6 @@ extern int cf_sbuf_len;
 #include "loader.h"
 #include "client.h"
 #include "server.h"
-#include "auth.h"
 #include "pooler.h"
 #include "proto.h"
 #include "objects.h"

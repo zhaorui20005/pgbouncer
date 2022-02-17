@@ -42,6 +42,9 @@
 #ifdef USE_SYSTEMD
 #include <systemd/sd-daemon.h>
 #else
+#define SD_LISTEN_FDS_START 3
+#define sd_is_socket(fd, f, t, l) (0)
+#define sd_listen_fds(ue) (0)
 #define sd_notify(ue, s)
 #define sd_notifyf(ue, f, ...)
 #endif
@@ -120,11 +123,35 @@ extern int cf_sbuf_len;
 #include "hba.h"
 #include "pam.h"
 
-/* to avoid allocations will use static buffers */
+#ifndef WIN32
+#define DEFAULT_UNIX_SOCKET_DIR "/tmp"
+#else
+#define DEFAULT_UNIX_SOCKET_DIR ""
+#endif
+
+/*
+ * To avoid allocations, we use static buffers.
+ *
+ * Note that a trailing zero byte is used in each case, so the actual
+ * usable length is one less.
+ */
+
+/* matching NAMEDATALEN */
 #define MAX_DBNAME	64
-#define MAX_USERNAME	64
-/* typical SCRAM-SHA-256 verifier takes at least 133 bytes */
-#define MAX_PASSWORD	160
+
+/*
+ * Ought to match NAMEDATALEN.  Some cloud services use longer user
+ * names, so give it some extra room.
+ */
+#define MAX_USERNAME	128
+
+/*
+ * Some cloud services use very long generated passwords, so give it
+ * plenty of room.  Up to PostgreSQL 13, the server can handle
+ * passwords up to 996 bytes, after that it's longer.  Also, libpq
+ * maxes out around 1024, so going much higher is not straightforward.
+ */
+#define MAX_PASSWORD	996
 
 /*
  * AUTH_* symbols are used for both protocol handling and
@@ -265,10 +292,10 @@ struct PgPool {
 
 	/* if last connect to server failed, there should be delay before next */
 	usec_t last_connect_time;
-	unsigned last_connect_failed:1;
-	unsigned last_login_failed:1;
+	bool last_connect_failed:1;
+	bool last_login_failed:1;
 
-	unsigned welcome_msg_ready:1;
+	bool welcome_msg_ready:1;
 };
 
 #define pool_connected_server_count(pool) ( \
@@ -302,6 +329,10 @@ struct PgUser {
 	struct AANode tree_node;	/* used to attach user to tree */
 	char name[MAX_USERNAME];
 	char passwd[MAX_PASSWORD];
+	uint8_t scram_ClientKey[32];
+	uint8_t scram_ServerKey[32];
+	bool has_scram_keys;		/* true if the above two are valid */
+	bool mock_auth;			/* not a real user, only for mock auth */
 	int pool_mode;
 	int max_user_connections;	/* how much server connections are allowed */
 	int connection_count;	/* how much connections are used by user now */
@@ -330,6 +361,7 @@ struct PgDatabase {
 	int port;
 
 	int pool_size;		/* max server connections in one pool */
+	int min_pool_size;	/* min server connections in one pool */
 	int res_pool_size;	/* additional server connections in case of trouble */
 	int pool_mode;		/* pool mode for this database */
 	int max_db_connections;	/* max server connections between all pools */
@@ -358,7 +390,7 @@ struct PgSocket {
 	PgSocket *link;		/* the dest of packets */
 	PgPool *pool;		/* parent pool, if NULL not yet assigned */
 
-	PgUser *auth_user;	/* presented login, for client it may differ from pool->user */
+	PgUser *login_user;	/* presented login, for client it may differ from pool->user */
 
 	int client_auth_type;	/* auth method decided by hba */
 
@@ -410,9 +442,11 @@ struct PgSocket {
 		char *server_first_message;
 		uint8_t	*SaltedPassword;
 		char cbind_flag;
+		bool adhoc;	/* SCRAM data made up from plain-text password */
 		int iterations;
 		char *salt;	/* base64-encoded */
-		uint8_t StoredKey[32];	/* SHA256_DIGEST_LENGTH */
+		uint8_t ClientKey[32];	/* SHA256_DIGEST_LENGTH */
+		uint8_t StoredKey[32];
 		uint8_t ServerKey[32];
 	} scram_state;
 
@@ -568,5 +602,5 @@ void load_config(void);
 
 
 bool set_config_param(const char *key, const char *val);
-void config_for_each(void (*param_cb)(void *arg, const char *name, const char *val, bool reloadable),
+void config_for_each(void (*param_cb)(void *arg, const char *name, const char *val, const char *defval, bool reloadable),
 		     void *arg);

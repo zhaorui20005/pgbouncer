@@ -113,9 +113,15 @@ bool get_header(struct MBuf *data, PktHdr *pkt)
 
 /*
  * Send error message packet to client.
+ *
+ * If level_fatal is true, use severity "FATAL", else "ERROR".  Although it is
+ * not technically part of the protocol specification, some clients expect the
+ * connection to be closed after receiving a FATAL error, and don't expect it
+ * to be closed after an ERROR-level error.  So to be nice, level_fatal should
+ * be true if the caller plans to close the connection after sending this
+ * error.
  */
-
-bool send_pooler_error(PgSocket *client, bool send_ready, const char *msg)
+bool send_pooler_error(PgSocket *client, bool send_ready, bool level_fatal, const char *msg)
 {
 	uint8_t tmpbuf[512];
 	PktBuf buf;
@@ -125,7 +131,8 @@ bool send_pooler_error(PgSocket *client, bool send_ready, const char *msg)
 
 	pktbuf_static(&buf, tmpbuf, sizeof(tmpbuf));
 	pktbuf_write_generic(&buf, 'E', "cscscsc",
-			     'S', "ERROR", 'C', "08P01", 'M', msg, 0);
+			     'S', level_fatal ? "FATAL" : "ERROR",
+			     'C', "08P01", 'M', msg, 0);
 	if (send_ready)
 		pktbuf_write_ReadyForQuery(&buf);
 	return pktbuf_send_immediate(&buf, client);
@@ -205,7 +212,7 @@ void finish_welcome_msg(PgSocket *server)
 	PgPool *pool = server->pool;
 	if (pool->welcome_msg_ready)
 		return;
-	pool->welcome_msg_ready = 1;
+	pool->welcome_msg_ready = true;
 }
 
 bool welcome_client(PgSocket *client)
@@ -310,8 +317,19 @@ static bool login_scram_sha_256(PgSocket *server)
 	bool res;
 	char *client_first_message = NULL;
 
-	if (get_password_type(user->passwd) != PASSWORD_TYPE_PLAINTEXT) {
-		slog_error(server, "cannot do SCRAM authentication: password is not plain text");
+	switch (get_password_type(user->passwd)) {
+	case PASSWORD_TYPE_PLAINTEXT:
+		/* ok */
+		break;
+	case PASSWORD_TYPE_SCRAM_SHA_256:
+		if (!user->has_scram_keys) {
+			slog_error(server, "cannot do SCRAM authentication: password is SCRAM secret but client authentication did not provide SCRAM keys");
+			kill_pool_logins(server->pool, "server login failed: wrong password type");
+			return false;
+		}
+		break;
+	default:
+		slog_error(server, "cannot do SCRAM authentication: wrong password type");
 		kill_pool_logins(server->pool, "server login failed: wrong password type");
 		return false;
 	}
@@ -371,7 +389,7 @@ static bool login_scram_sha_256_cont(PgSocket *server, unsigned datalen, const u
 		goto failed;
 
 	client_final_message = build_client_final_message(&server->scram_state,
-							  user->passwd, server_nonce,
+							  user, server_nonce,
 							  salt, saltlen, iterations);
 
 	free(salt);
@@ -392,6 +410,7 @@ failed:
 
 static bool login_scram_sha_256_final(PgSocket *server, unsigned datalen, const uint8_t *data)
 {
+	PgUser *user = get_srv_psw(server);
 	char *ibuf = NULL;
 	char *input;
 	char ServerSignature[SHA256_DIGEST_LENGTH];
@@ -413,7 +432,7 @@ static bool login_scram_sha_256_final(PgSocket *server, unsigned datalen, const 
 	if (!read_server_final_message(server, input, ServerSignature))
 		goto failed;
 
-	if (!verify_server_signature(&server->scram_state, ServerSignature))
+	if (!verify_server_signature(&server->scram_state, user, ServerSignature))
 	{
 		slog_error(server, "invalid server signature");
 		kill_pool_logins(server->pool, "server login failed: invalid server signature");
@@ -533,23 +552,30 @@ bool send_sslreq_packet(PgSocket *server)
 	return res;
 }
 
+/*
+ * decode DataRow packet (opposite of pktbuf_write_DataRow)
+ *
+ * tupdesc keys:
+ * 'i' - int4
+ * 'q' - int8
+ * 's' - text to string
+ * 'b' - bytea to bytes (result is malloced)
+ */
 int scan_text_result(struct MBuf *pkt, const char *tupdesc, ...)
 {
-	const char *val = NULL;
-	uint32_t len;
 	uint16_t ncol;
-	unsigned i, asked;
+	unsigned asked;
 	va_list ap;
-	int *int_p;
-	uint64_t *long_p;
-	const char **str_p;
 
 	asked = strlen(tupdesc);
 	if (!mbuf_get_uint16be(pkt, &ncol))
 		return -1;
 
 	va_start(ap, tupdesc);
-	for (i = 0; i < asked; i++) {
+	for (unsigned i = 0; i < asked; i++) {
+		const char *val = NULL;
+		uint32_t len;
+
 		if (i < ncol) {
 			if (!mbuf_get_uint32be(pkt, &len)) {
 				va_end(ap);
@@ -574,21 +600,58 @@ int scan_text_result(struct MBuf *pkt, const char *tupdesc, ...)
 		} else {
 			/* tuple was shorter than requested */
 			val = NULL;
+			len = -1;
 		}
 
 		switch (tupdesc[i]) {
-		case 'i':
+		case 'i': {
+			int *int_p;
+
 			int_p = va_arg(ap, int *);
 			*int_p = val ? atoi(val) : 0;
 			break;
-		case 'q':
+		}
+		case 'q': {
+			uint64_t *long_p;
+
 			long_p = va_arg(ap, uint64_t *);
 			*long_p = val ? atoll(val) : 0;
 			break;
-		case 's':
+		}
+		case 's': {
+			const char **str_p;
+
 			str_p = va_arg(ap, const char **);
 			*str_p = val;
 			break;
+		}
+		case 'b': {
+			int *len_p = va_arg(ap, int *);
+			uint8_t **bytes_p = va_arg(ap, uint8_t **);
+
+			if (val) {
+				int newlen;
+				if (strncmp(val, "\\x", 2) != 0) {
+					log_warning("invalid bytea value");
+					return -1;
+				}
+
+				newlen = (len - 2) / 2;
+				*len_p = newlen;
+				*bytes_p = malloc(newlen);
+				if (!(*bytes_p))
+					return -1;
+				for (int j = 0; j < newlen; j++) {
+					unsigned int b;
+					sscanf(val + 2 + 2 * j, "%2x", &b);
+					(*bytes_p)[j] = b;
+				}
+			} else {
+				*len_p = -1;
+				*bytes_p = NULL;
+			}
+			break;
+		}
 		default:
 			fatal("bad tupdesc: %s", tupdesc);
 		}

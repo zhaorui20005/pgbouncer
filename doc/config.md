@@ -12,15 +12,21 @@ and "#" are not recognized as special when they appear later in the line.
 
 ### logfile
 
-Specifies the log file. The log file is kept open, so after rotation `kill -HUP`
+Specifies the log file.  For daemonization (`-d`), either this or
+`syslog` need to be set.
+
+The log file is kept open, so after rotation `kill -HUP`
 or on console `RELOAD;` should be done.
 On Windows, the service must be stopped and started.
+
+Note that setting `logfile` does not by itself turn off logging to
+stderr.  Use the command-line option `-q` or `-d` for that.
 
 Default: not set
 
 ### pidfile
 
-Specifies the PID file. Without `pidfile` set, daemonization is not allowed.
+Specifies the PID file. Without `pidfile` set, daemonization (`-d`) is not allowed.
 
 Default: not set
 
@@ -44,20 +50,28 @@ Default: 6432
 
 Specifies location for Unix sockets. Applies to both listening socket and
 server connections. If set to an empty string, Unix sockets are disabled.
-Required for online reboot (-R) to work.
-Not supported on Windows.
+A value that starts with `@` specifies that a Unix socket in the
+abstract namespace should be created (currently supported on Linux and
+Windows).
 
-Default: /tmp
+For online reboot (`-R`) to work, a Unix socket needs to be
+configured, and it needs to be in the file-system namespace.
+
+Default: /tmp (empty on Windows)
 
 ### unix_socket_mode
 
 File system mode for Unix socket.
+Ignored for sockets in the abstract namespace.
+Not supported on Windows.
 
 Default: 0777
 
 ### unix_socket_group
 
 Group name to use for Unix socket.
+Ignored for sockets in the abstract namespace.
+Not supported on Windows.
 
 Default: not set
 
@@ -109,10 +123,7 @@ md5
 
 scram-sha-256
 :   Use password check with SCRAM-SHA-256.  `auth_file` has to contain
-    SCRAM secrets or plain-text passwords.  Note that SCRAM secrets
-    can only be used for verifying the password of a client but not
-    for logging into a server.  To be able to use SCRAM on server
-    connections, use plain-text passwords.
+    SCRAM secrets or plain-text passwords.
 
 plain
 :   The clear-text password is sent over the wire.  Deprecated.
@@ -142,6 +153,8 @@ Default: `SELECT usename, passwd FROM pg_shadow WHERE usename=$1`
 If `auth_user` is set, then any user not specified in `auth_file` will be
 queried through the `auth_query` query from pg_shadow in the database,
 using `auth_user`. The password of `auth_user` will be taken from `auth_file`.
+(If the `auth_user` does not require a password then it does not need
+to be defined in `auth_file`.)
 
 Direct access to pg_shadow requires admin rights.  It's preferable to
 use a non-superuser that calls a SECURITY DEFINER function instead.
@@ -605,6 +618,14 @@ Default: `secure`
 
 ### client_tls_ciphers
 
+Allowed TLS ciphers, in OpenSSL syntax.  Shortcuts:
+`default`/`secure`, `compat`/`legacy`, `insecure`/`all`, `normal`,
+`fast`.
+
+Only connections using TLS version 1.2 and lower are affected.  There
+is currently no setting that controls the cipher choices used by TLS
+version 1.3 connections.
+
 Default: `fast`
 
 ### client_tls_ecdhcurve
@@ -676,11 +697,19 @@ Default: not set
 Which TLS protocol versions are allowed.  Allowed values: `tlsv1.0`, `tlsv1.1`, `tlsv1.2`, `tlsv1.3`.
 Shortcuts: `all` (tlsv1.0,tlsv1.1,tlsv1.2,tlsv1.3), `secure` (tlsv1.2,tlsv1.3), `legacy` (all).
 
-Default: `all`
+Default: `secure`
 
 ### server_tls_ciphers
 
-Default: `HIGH:MEDIUM:+3DES:!aNULL`
+Allowed TLS ciphers, in OpenSSL syntax.  Shortcuts:
+`default`/`secure`, `compat`/`legacy`, `insecure`/`all`, `normal`,
+`fast`.
+
+Only connections using TLS version 1.2 and lower are affected.  There
+is currently no setting that controls the cipher choices used by TLS
+version 1.3 connections.
+
+Default: `fast`
 
 
 ## Dangerous timeouts
@@ -845,8 +874,23 @@ The database name can contain characters `_0-9A-Za-z` without quoting.
 Names that contain other characters need to be quoted with standard SQL
 identifier quoting: double quotes, with "" for a single instance of a double quote.
 
-"*" acts as a fallback database: if the exact name does not exist,
-its value is taken as connection string for requested database.
+The database name "pgbouncer" is reserved for the admin console and
+cannot be used as a key here.
+
+"*" acts as a fallback database: If the exact name does not exist, its
+value is taken as connection string for the requested database.  For
+example, if there is an entry (and no other overriding entries)
+
+    * = host=foo
+
+then a connection to PgBouncer specifying a database "bar" will
+effectively behave as if an entry
+
+    bar = host=foo dbname=bar
+
+exists (taking advantage of the default for `dbname` being the
+client-side database name; see below).
+
 Such automatically created database entries are cleaned up
 if they stay idle longer than the time specified by the `autodb_idle_timeout`
 parameter.
@@ -867,6 +911,10 @@ mode), and new server connections immediately use the new resolution.
 If DNS returns several results, they are used in round-robin
 manner.
 
+If the value begins with `/`, then a Unix socket in the file-system
+namespace is used.  If the value begins with `@`, then a Unix socket
+in the abstract namespace is used.
+
 Default: not set, meaning to use a Unix socket
 
 ### port
@@ -884,8 +932,6 @@ user name, meaning that there will be one pool per user.
 
 ### password
 
-The length for `password` is limited to 160 characters maximum.
-
 If no password is specified here, the password from the `auth_file` or
 `auth_query` will be used.
 
@@ -897,6 +943,11 @@ Override of the global `auth_user` setting, if specified.
 
 Set the maximum size of pools for this database.  If not set,
 the `default_pool_size` is used.
+
+### min_pool_size
+
+Set the minimum pool size for this database. If not set, the global `min_pool_size` is
+used.
 
 ### reserve_pool
 
@@ -975,6 +1026,7 @@ file in the following format:
 There should be at least 2 fields, surrounded by double quotes. The first
 field is the user name and the second is either a plain-text, a MD5-hashed
 password, or a SCRAM secret.  PgBouncer ignores the rest of the line.
+Double quotes in a field value can be escaped by writing two double quotes.
 
 PostgreSQL MD5-hashed password format:
 
@@ -996,8 +1048,14 @@ configured.  Second, they are used as the passwords for outgoing
 connections to the backend server, if the backend server requires
 password-based authentication (unless the password is specified
 directly in the database's connection string).  The latter works if
-the password is stored in plain text or MD5-hashed.  SCRAM secrets
-cannot be used for logging into a server.
+the password is stored in plain text or MD5-hashed.  SCRAM secrets can
+only be used for logging into a server if the client authentication
+also uses SCRAM, the PgBouncer database definition does not specify a
+user name, and the SCRAM secrets are identical in PgBouncer and the
+PostgreSQL server (same salt and iterations, not merely the same
+password).  This is due to an inherent security property of SCRAM: The
+stored SCRAM secret cannot by itself be used for deriving login
+credentials.
 
 The authentication file can be written by hand, but it's also useful
 to generate it from some other list of users and passwords.  See
@@ -1026,12 +1084,12 @@ It follows the format of the PostgreSQL `pg_hba.conf` file
 Minimal config:
 
     [databases]
-    template1 = host=127.0.0.1 dbname=template1 auth_user=someuser
+    template1 = host=localhost dbname=template1 auth_user=someuser
 
     [pgbouncer]
     pool_mode = session
     listen_port = 6432
-    listen_addr = 127.0.0.1
+    listen_addr = localhost
     auth_type = md5
     auth_file = users.txt
     logfile = pgbouncer.log
@@ -1047,10 +1105,10 @@ Database defaults:
     foodb =
 
     ; redirect bardb to bazdb on localhost
-    bardb = host=127.0.0.1 dbname=bazdb
+    bardb = host=localhost dbname=bazdb
 
     ; access to destination database will go with single user
-    forcedb = host=127.0.0.1 port=300 user=baz password=foo client_encoding=UNICODE datestyle=ISO
+    forcedb = host=localhost port=300 user=baz password=foo client_encoding=UNICODE datestyle=ISO
 
 Example of a secure function for `auth_query`:
 

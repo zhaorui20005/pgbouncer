@@ -41,7 +41,7 @@ int log_socket_prefix(enum LogLevel lev, void *ctx, char *dst, unsigned int dstl
 	stype = is_server_socket(sock) ? 'S' : 'C';
 	port = pga_port(&sock->remote_addr);
 	db = sock->pool ? sock->pool->db->name : "(nodb)";
-	user = sock->auth_user ? sock->auth_user->name : "(nouser)";
+	user = sock->login_user ? sock->login_user->name : "(nouser)";
 	if (pga_is_unix(&sock->remote_addr)) {
 		unsigned long pid = sock->remote_addr.scred.pid;
 		if (pid) {
@@ -237,7 +237,12 @@ void fill_remote_addr(PgSocket *sk, int fd, bool is_unix)
 		pga_set(dst, AF_UNIX, cf_listen_port);
 		if (getpeercreds(fd, &uid, &gid, &pid) >= 0) {
 			log_noise("unix peer uid: %d", (int)uid);
-		} else {
+		} else if (errno != ENOSYS) {
+			/*
+			 * Check for ENOSYS, so we don't write a
+			 * warning every time if the OS doesn't
+			 * support this call.
+			 */
 			log_warning("unix peer uid failed: %s", strerror(errno));
 		}
 		dst->scred.uid = uid;

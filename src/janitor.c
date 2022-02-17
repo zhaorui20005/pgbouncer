@@ -56,7 +56,7 @@ bool suspend_socket(PgSocket *sk, bool force_suspend)
 
 	if (sbuf_is_empty(&sk->sbuf)) {
 		if (sbuf_pause(&sk->sbuf))
-			sk->suspended = 1;
+			sk->suspended = true;
 	}
 
 	if (sk->suspended || !force_suspend)
@@ -93,7 +93,7 @@ static void resume_socket_list(struct StatList *list)
 	statlist_for_each_safe(item, list, tmp) {
 		sk = container_of(item, PgSocket, head);
 		if (sk->suspended) {
-			sk->suspended = 0;
+			sk->suspended = false;
 			sbuf_continue(&sk->sbuf);
 		}
 	}
@@ -173,6 +173,12 @@ static void per_loop_activate(PgPool *pool)
 	struct List *item, *tmp;
 	PgSocket *client;
 	int sv_tested, sv_used;
+
+	/* if there is a cancel request waiting, open a new connection */
+	if (!statlist_empty(&pool->cancel_req_list)) {
+		launch_new_connection(pool);
+		return;
+	}
 
 	/* see if any server have been freed */
 	sv_tested = statlist_count(&pool->tested_server_list);
@@ -297,10 +303,10 @@ void per_loop_maint(void)
 {
 	struct List *item;
 	PgPool *pool;
-	int active = 0;
+	int active_count = 0;
 	int waiting_count = 0;
-	int partial_pause = 0;
-	int partial_wait = 0;
+	bool partial_pause = false;
+	bool partial_wait = false;
 	bool force_suspend = false;
 
 	if (cf_pause_mode == P_SUSPEND && cf_suspend_timeout > 0) {
@@ -316,22 +322,22 @@ void per_loop_maint(void)
 		switch (cf_pause_mode) {
 		case P_NONE:
 			if (pool->db->db_paused) {
-				partial_pause = 1;
-				active += per_loop_pause(pool);
+				partial_pause = true;
+				active_count += per_loop_pause(pool);
 			} else {
 				per_loop_activate(pool);
 			}
 			break;
 		case P_PAUSE:
-			active += per_loop_pause(pool);
+			active_count += per_loop_pause(pool);
 			break;
 		case P_SUSPEND:
-			active += per_loop_suspend(pool, force_suspend);
+			active_count += per_loop_suspend(pool, force_suspend);
 			break;
 		}
 
 		if (pool->db->db_wait_close) {
-			partial_wait = 1;
+			partial_wait = true;
 			waiting_count += per_loop_wait_close(pool);
 		}
 	}
@@ -341,15 +347,15 @@ void per_loop_maint(void)
 		if (force_suspend) {
 			close_client_list(&login_client_list, "suspend_timeout");
 		} else {
-			active += statlist_count(&login_client_list);
+			active_count += statlist_count(&login_client_list);
 		}
 		/* fallthrough */
 	case P_PAUSE:
-		if (!active)
+		if (!active_count)
 			admin_pause_done();
 		break;
 	case P_NONE:
-		if (partial_pause && !active)
+		if (partial_pause && !active_count)
 			admin_pause_done();
 		break;
 	}
@@ -424,8 +430,8 @@ static void check_unused_servers(PgPool *pool, struct StatList *slist, bool idle
 	 * must be separated.  This avoids the need to re-launch lot
 	 * of connections together.
 	 */
-	if (pool->db->pool_size > 0)
-		lifetime_kill_gap = cf_server_lifetime / pool->db->pool_size;
+	if (pool_pool_size(pool) > 0)
+		lifetime_kill_gap = cf_server_lifetime / pool_pool_size(pool);
 
 	/* disconnect idle servers if needed */
 	statlist_for_each_safe(item, slist, tmp) {
@@ -441,7 +447,7 @@ static void check_unused_servers(PgPool *pool, struct StatList *slist, bool idle
 		} else if (server->state == SV_USED && !server->ready) {
 			disconnect_server(server, true, "SV_USED server got dirty");
 		} else if (cf_server_idle_timeout > 0 && idle > cf_server_idle_timeout
-			   && (cf_min_pool_size == 0 || pool_connected_server_count(pool) > cf_min_pool_size)) {
+			   && (pool_min_pool_size(pool) == 0 || pool_connected_server_count(pool) > pool_min_pool_size(pool))) {
 			disconnect_server(server, true, "server idle timeout");
 		} else if (age >= cf_server_lifetime) {
 			if (pool->last_lifetime_disconnect + lifetime_kill_gap <= now) {
@@ -465,9 +471,9 @@ static void check_pool_size(PgPool *pool)
 {
 	PgSocket *server;
 	int cur = pool_connected_server_count(pool);
-	int many = cur - (pool->db->pool_size + pool->db->res_pool_size);
+	int many = cur - (pool_pool_size(pool) + pool_res_pool_size(pool));
 
-	Assert(pool->db->pool_size >= 0);
+	Assert(pool_pool_size(pool) >= 0);
 
 	while (many > 0) {
 		server = first_socket(&pool->used_server_list);
@@ -481,8 +487,8 @@ static void check_pool_size(PgPool *pool)
 	}
 
 	/* launch extra connections to satisfy min_pool_size */
-	if (cur < cf_min_pool_size &&
-	    cur < pool->db->pool_size &&
+	if (cur < pool_min_pool_size(pool) &&
+	    cur < pool_pool_size(pool) &&
 	    cf_pause_mode == P_NONE &&
 	    cf_reboot == 0 &&
 	    pool_client_count(pool) > 0)
@@ -736,9 +742,5 @@ void config_postprocess(void)
 			kill_database(db);
 			continue;
 		}
-		if (db->pool_size < 0)
-			db->pool_size = cf_default_pool_size;
-		if (db->res_pool_size < 0)
-			db->res_pool_size = cf_res_pool_size;
 	}
 }

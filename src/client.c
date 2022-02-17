@@ -37,12 +37,14 @@ static const char *hdr2hex(const struct MBuf *data, char *buf, unsigned buflen)
 
 static bool check_client_passwd(PgSocket *client, const char *passwd)
 {
-	char md5[MD5_PASSWD_LEN + 1];
-	PgUser *user = client->auth_user;
+	PgUser *user = client->login_user;
 	int auth_type = client->client_auth_type;
 
+	if (user->mock_auth)
+		return false;
+
 	/* disallow empty passwords */
-	if (!*passwd || !*user->passwd)
+	if (!*user->passwd)
 		return false;
 
 	switch (auth_type) {
@@ -50,21 +52,39 @@ static bool check_client_passwd(PgSocket *client, const char *passwd)
 		switch (get_password_type(user->passwd)) {
 		case PASSWORD_TYPE_PLAINTEXT:
 			return strcmp(user->passwd, passwd) == 0;
-		case PASSWORD_TYPE_MD5:
+		case PASSWORD_TYPE_MD5: {
+			char md5[MD5_PASSWD_LEN + 1];
 			pg_md5_encrypt(passwd, user->name, strlen(user->name), md5);
 			return strcmp(user->passwd, md5) == 0;
+		}
 		case PASSWORD_TYPE_SCRAM_SHA_256:
 			return scram_verify_plain_password(client, user->name, passwd, user->passwd);
 		default:
 			return false;
 		}
-	case AUTH_MD5:
+	case AUTH_MD5: {
+		char *stored_passwd;
+		char md5[MD5_PASSWD_LEN + 1];
+
 		if (strlen(passwd) != MD5_PASSWD_LEN)
 			return false;
-		if (get_password_type(user->passwd) == PASSWORD_TYPE_PLAINTEXT)
-			pg_md5_encrypt(user->passwd, user->name, strlen(user->name), user->passwd);
-		pg_md5_encrypt(user->passwd + 3, (char *)client->tmp_login_salt, 4, md5);
+
+		/*
+		 * The client sends
+		 * 'md5'+md5(md5(password+username)+salt).  The stored
+		 * password is either 'md5'+md5(password+username) or
+		 * plain text.  If the latter, we compute the inner
+		 * md5() call first.
+		 */
+		if (get_password_type(user->passwd) == PASSWORD_TYPE_PLAINTEXT) {
+			pg_md5_encrypt(user->passwd, user->name, strlen(user->name), md5);
+			stored_passwd = md5;
+		} else {
+			stored_passwd = user->passwd;
+		}
+		pg_md5_encrypt(stored_passwd + 3, (char *)client->tmp_login_salt, 4, md5);
 		return strcmp(md5, passwd) == 0;
+	}
 	}
 	return false;
 }
@@ -91,7 +111,7 @@ static bool send_client_authreq(PgSocket *client)
 	return res;
 }
 
-static void start_auth_request(PgSocket *client, const char *username)
+static void start_auth_query(PgSocket *client, const char *username)
 {
 	int res;
 	PktBuf *buf;
@@ -110,7 +130,7 @@ static void start_auth_request(PgSocket *client, const char *username)
 		disconnect_client(client, true, "pause failed");
 		return;
 	}
-	client->link->ready = 0;
+	client->link->ready = false;
 
 	res = 0;
 	buf = pktbuf_dynamic(512);
@@ -133,29 +153,36 @@ static bool login_via_cert(PgSocket *client)
 	struct tls *tls = client->sbuf.tls;
 
 	if (!tls) {
-		disconnect_client(client, true, "TLS connection required");
-		return false;
+		slog_error(client, "TLS connection required");
+		goto fail;
 	}
 	if (!tls_peer_cert_provided(client->sbuf.tls)) {
-		disconnect_client(client, true, "TLS client certificate required");
-		return false;
+		slog_error(client, "TLS client certificate required");
+		goto fail;
 	}
+	if (client->login_user->mock_auth)
+		goto fail;
 
 	log_debug("TLS cert login: %s", tls_peer_cert_subject(client->sbuf.tls));
-	if (!tls_peer_cert_contains_name(client->sbuf.tls, client->auth_user->name)) {
-		disconnect_client(client, true, "TLS certificate name mismatch");
-		return false;
+	if (!tls_peer_cert_contains_name(client->sbuf.tls, client->login_user->name)) {
+		slog_error(client, "TLS certificate name mismatch");
+		goto fail;
 	}
 
 	/* login successful */
 	return finish_client_login(client);
+fail:
+	disconnect_client(client, true, "certificate authentication failed");
+	return false;
 }
 
 static bool login_as_unix_peer(PgSocket *client)
 {
 	if (!pga_is_unix(&client->remote_addr))
 		goto fail;
-	if (!check_unix_peer_name(sbuf_socket(&client->sbuf), client->auth_user->name))
+	if (client->login_user->mock_auth)
+		goto fail;
+	if (!check_unix_peer_name(sbuf_socket(&client->sbuf), client->login_user->name))
 		goto fail;
 	return finish_client_login(client);
 fail:
@@ -165,18 +192,22 @@ fail:
 
 static bool finish_set_pool(PgSocket *client, bool takeover)
 {
-	PgUser *user = client->auth_user;
 	bool ok = false;
 	int auth;
 
-	/* pool user may be forced */
-	if (client->db->forced_user) {
-		user = client->db->forced_user;
-	}
-	client->pool = get_pool(client->db, user);
-	if (!client->pool) {
-		disconnect_client(client, true, "no memory for pool");
-		return false;
+	if (!client->login_user->mock_auth) {
+		PgUser *pool_user;
+
+		if (client->db->forced_user)
+			pool_user = client->db->forced_user;
+		else
+			pool_user = client->login_user;
+
+		client->pool = get_pool(client->db, pool_user);
+		if (!client->pool) {
+			disconnect_client(client, true, "no memory for pool");
+			return false;
+		}
 	}
 
 	if (cf_log_connections) {
@@ -184,10 +215,10 @@ static bool finish_set_pool(PgSocket *client, bool takeover)
 			char infobuf[96] = "";
 			tls_get_connection_info(client->sbuf.tls, infobuf, sizeof infobuf);
 			slog_info(client, "login attempt: db=%s user=%s tls=%s",
-				  client->db->name, client->auth_user->name, infobuf);
+				  client->db->name, client->login_user->name, infobuf);
 		} else {
 			slog_info(client, "login attempt: db=%s user=%s tls=no",
-				  client->db->name, client->auth_user->name);
+				  client->db->name, client->login_user->name);
 		}
 	}
 
@@ -197,7 +228,7 @@ static bool finish_set_pool(PgSocket *client, bool takeover)
 	if (takeover)
 		return true;
 
-	if (client->pool->db->admin) {
+	if (client->pool && client->pool->db->admin) {
 		if (!admin_post_login(client))
 			return false;
 	}
@@ -208,12 +239,12 @@ static bool finish_set_pool(PgSocket *client, bool takeover)
 	auth = cf_auth_type;
 	if (auth == AUTH_HBA) {
 		auth = hba_eval(parsed_hba, &client->remote_addr, !!client->sbuf.tls,
-				client->db->name, client->auth_user->name);
+				client->db->name, client->login_user->name);
 	}
 
 	if (auth == AUTH_MD5)
 	{
-		if (get_password_type(client->auth_user->passwd) == PASSWORD_TYPE_SCRAM_SHA_256)
+		if (get_password_type(client->login_user->passwd) == PASSWORD_TYPE_SCRAM_SHA_256)
 			auth = AUTH_SCRAM_SHA_256;
 	}
 
@@ -222,8 +253,13 @@ static bool finish_set_pool(PgSocket *client, bool takeover)
 
 	switch (auth) {
 	case AUTH_ANY:
-	case AUTH_TRUST:
 		ok = finish_client_login(client);
+		break;
+	case AUTH_TRUST:
+		if (client->login_user->mock_auth)
+			disconnect_client(client, true, "\"trust\" authentication failed");
+		else
+			ok = finish_client_login(client);
 		break;
 	case AUTH_PLAIN:
 	case AUTH_MD5:
@@ -296,7 +332,7 @@ bool set_pool(PgSocket *client, const char *dbname, const char *username, const 
 			disconnect_client(client, true, "bouncer config error");
 			return false;
 		}
-		client->auth_user = client->db->forced_user;
+		client->login_user = client->db->forced_user;
 	} else if (cf_auth_type == AUTH_PAM) {
 		if (client->db->auth_user) {
 			slog_error(client, "PAM can't be used together with database authentication");
@@ -304,34 +340,47 @@ bool set_pool(PgSocket *client, const char *dbname, const char *username, const 
 			return false;
 		}
 		/* Password will be set after successful authentication when not in takeover mode */
-		client->auth_user = add_pam_user(username, password);
-		if (!client->auth_user) {
+		client->login_user = add_pam_user(username, password);
+		if (!client->login_user) {
 			slog_error(client, "set_pool(): failed to allocate new PAM user");
 			disconnect_client(client, true, "bouncer resources exhaustion");
 			return false;
 		}
 	} else {
-		/* the user clients wants to log in as */
-		client->auth_user = find_user(username);
-		if (!client->auth_user && client->db->auth_user) {
-			if (takeover) {
-				client->auth_user = add_db_user(client->db, username, password);
-				return finish_set_pool(client, takeover);
+		client->login_user = find_user(username);
+		if (!client->login_user) {
+			/*
+			 * If the login user specified by the client
+			 * does not exist, check if an auth_user is
+			 * set and if so send off an auth_query.  If
+			 * no auth_user is set for the db, see if the
+			 * global auth_user is set and use that.
+			 */
+			if (!client->db->auth_user && cf_auth_user) {
+				client->db->auth_user = find_user(cf_auth_user);
+				if (!client->db->auth_user)
+					client->db->auth_user = add_user(cf_auth_user, "");
 			}
-			start_auth_request(client, username);
-			return false;
-		}
-		if (!client->auth_user) {
-			disconnect_client(client, true, "no such user: %s", username);
-			if (cf_log_connections)
-				slog_info(client, "login failed: db=%s user=%s", dbname, username);
-			return false;
+			if (client->db->auth_user) {
+				if (takeover) {
+					client->login_user = add_db_user(client->db, username, password);
+					return finish_set_pool(client, takeover);
+				}
+				start_auth_query(client, username);
+				return false;
+			}
+
+			slog_info(client, "no such user: %s", username);
+			client->login_user = calloc(1, sizeof(*client->login_user));
+			client->login_user->mock_auth = true;
+			safe_strcpy(client->login_user->name, username, sizeof(client->login_user->name));
 		}
 	}
+
 	return finish_set_pool(client, takeover);
 }
 
-bool handle_auth_response(PgSocket *client, PktHdr *pkt) {
+bool handle_auth_query_response(PgSocket *client, PktHdr *pkt) {
 	uint16_t columns;
 	uint32_t length;
 	const char *username, *password;
@@ -395,8 +444,8 @@ bool handle_auth_response(PgSocket *client, PktHdr *pkt) {
 			length = sizeof(user.passwd) - 1;
 		memcpy(user.passwd, password, length);
 
-		client->auth_user = add_db_user(client->db, user.name, user.passwd);
-		if (!client->auth_user) {
+		client->login_user = add_db_user(client->db, user.name, user.passwd);
+		if (!client->login_user) {
 			disconnect_server(server, false, "unable to allocate new user for auth");
 			return false;
 		}
@@ -413,9 +462,20 @@ bool handle_auth_response(PgSocket *client, PktHdr *pkt) {
 		break;
 	case 'Z':	/* ReadyForQuery */
 		sbuf_prepare_skip(&client->link->sbuf, pkt->len);
-		if (!client->auth_user) {
+		if (!client->login_user) {
 			if (cf_log_connections)
 				slog_info(client, "login failed: db=%s", client->db->name);
+			/*
+			 * TODO: Currently no mock authentication when
+			 * using auth_query/auth_user; we just abort
+			 * with a revealing message to the client.
+			 * The main problem is that at this point we
+			 * don't know the original user name anymore
+			 * to do that.  As a workaround, the
+			 * auth_query could be written in a way that
+			 * it returns a fake user and password if the
+			 * requested user doesn't exist.
+			 */
 			disconnect_client(client, true, "no such user");
 		} else {
 			slog_noise(client, "auth query complete");
@@ -525,7 +585,7 @@ static bool scram_client_first(PgSocket *client, uint32_t datalen, const uint8_t
 	char *ibuf;
 	char *input;
 	int res;
-	PgUser *user = client->auth_user;
+	PgUser *user = client->login_user;
 
 	ibuf = malloc(datalen + 1);
 	if (ibuf == NULL)
@@ -541,17 +601,19 @@ static bool scram_client_first(PgSocket *client, uint32_t datalen, const uint8_t
 				       &client->scram_state.client_nonce))
 		goto failed;
 
-	slog_debug(client, "stored secret = \"%s\"", user->passwd);
-	switch (get_password_type(user->passwd)) {
-	case PASSWORD_TYPE_MD5:
-		slog_error(client, "SCRAM authentication failed: user has MD5 secret");
-		goto failed;
-	case PASSWORD_TYPE_PLAINTEXT:
-	case PASSWORD_TYPE_SCRAM_SHA_256:
-		break;
+	if (!user->mock_auth) {
+		slog_debug(client, "stored secret = \"%s\"", user->passwd);
+		switch (get_password_type(user->passwd)) {
+		case PASSWORD_TYPE_MD5:
+			slog_error(client, "SCRAM authentication failed: user has MD5 secret");
+			goto failed;
+		case PASSWORD_TYPE_PLAINTEXT:
+		case PASSWORD_TYPE_SCRAM_SHA_256:
+			break;
+		}
 	}
 
-	if (!build_server_first_message(&client->scram_state, user->passwd))
+	if (!build_server_first_message(&client->scram_state, user->name, user->mock_auth ? NULL : user->passwd))
 		goto failed;
 	slog_debug(client, "SCRAM server-first-message = \"%s\"", client->scram_state.server_first_message);
 
@@ -596,7 +658,8 @@ static bool scram_client_final(PgSocket *client, uint32_t datalen, const uint8_t
 		goto failed;
 	}
 
-	if (!verify_client_proof(&client->scram_state, proof)) {
+	if (!verify_client_proof(&client->scram_state, proof)
+	    || !client->login_user) {
 		slog_error(client, "password authentication failed");
 		goto failed;
 	}
@@ -655,7 +718,7 @@ static bool handle_client_startup(PgSocket *client, PktHdr *pkt)
 			disconnect_client(client, false, "SSL req inside SSL");
 			return false;
 		}
-		if (cf_client_tls_sslmode != SSLMODE_DISABLED && !is_unix) {
+		if (client_accept_sslmode != SSLMODE_DISABLED && !is_unix) {
 			slog_noise(client, "P: SSL ack");
 			if (!sbuf_answer(&client->sbuf, "S", 1)) {
 				disconnect_client(client, false, "failed to ack SSL");
@@ -677,7 +740,7 @@ static bool handle_client_startup(PgSocket *client, PktHdr *pkt)
 		break;
 	case PKT_GSSENCREQ:
 		/* reject GSS encryption attempt */
-		slog_noise(client, "C: req GCC enc");
+		slog_noise(client, "C: req GSS enc");
 		if (!sbuf_answer(&client->sbuf, "N", 1)) {
 			disconnect_client(client, false, "failed to nak GSS enc");
 			return false;
@@ -688,7 +751,7 @@ static bool handle_client_startup(PgSocket *client, PktHdr *pkt)
 		return false;
 	case PKT_STARTUP:
 		/* require SSL except on unix socket */
-		if (cf_client_tls_sslmode >= SSLMODE_REQUIRE && !client->sbuf.tls && !is_unix) {
+		if (client_accept_sslmode >= SSLMODE_REQUIRE && !client->sbuf.tls && !is_unix) {
 			disconnect_client(client, true, "SSL required");
 			return false;
 		}
@@ -709,7 +772,7 @@ static bool handle_client_startup(PgSocket *client, PktHdr *pkt)
 		break;
 	case 'p':		/* PasswordMessage, SASLInitialResponse, or SASLResponse */
 		/* too early */
-		if (!client->auth_user) {
+		if (!client->login_user) {
 			disconnect_client(client, true, "client password pkt before startup packet");
 			return false;
 		}
@@ -742,6 +805,17 @@ static bool handle_client_startup(PgSocket *client, PktHdr *pkt)
 				if (!mbuf_get_bytes(&pkt->data, length, &data))
 					return false;
 				if (scram_client_final(client, length, data)) {
+					/* save SCRAM keys for user */
+					if (!client->scram_state.adhoc) {
+						memcpy(client->pool->user->scram_ClientKey,
+						       client->scram_state.ClientKey,
+						       sizeof(client->scram_state.ClientKey));
+						memcpy(client->pool->user->scram_ServerKey,
+						       client->scram_state.ServerKey,
+						       sizeof(client->scram_state.ServerKey));
+						client->pool->user->has_scram_keys = true;
+					}
+
 					free_scram_state(&client->scram_state);
 					if (!finish_client_login(client))
 						return false;
@@ -756,6 +830,15 @@ static bool handle_client_startup(PgSocket *client, PktHdr *pkt)
 			ok = mbuf_get_string(&pkt->data, &passwd);
 
 			if (ok) {
+				/*
+				 * Don't allow an empty password; see
+				 * PostgreSQL recv_password_packet().
+				 */
+				if (!*passwd) {
+					disconnect_client(client, true, "empty password returned by client");
+					return false;
+				}
+
 				if (client->client_auth_type == AUTH_PAM) {
 					if (!sbuf_pause(&client->sbuf)) {
 						disconnect_client(client, true, "pause failed");
@@ -906,7 +989,14 @@ bool client_proto(SBuf *sbuf, SBufEvent evtype, struct MBuf *data)
 	case SBUF_EV_CONNECT_FAILED:
 		/* ^ those should not happen */
 	case SBUF_EV_RECV_FAILED:
-		disconnect_client(client, false, "client unexpected eof");
+		/*
+		 * Don't log error if client disconnects right away,
+		 * could be monitoring probe.
+		 */
+		if (client->state == CL_LOGIN && mbuf_avail_for_read(data) == 0)
+			disconnect_client(client, false, NULL);
+		else
+			disconnect_client(client, false, "client unexpected eof");
 		break;
 	case SBUF_EV_SEND_FAILED:
 		disconnect_server(client->link, false, "server connection closed");
@@ -924,6 +1014,24 @@ bool client_proto(SBuf *sbuf, SBufEvent evtype, struct MBuf *data)
 			return false;
 		}
 		slog_noise(client, "read pkt='%c' len=%d", pkt_desc(&pkt), pkt.len);
+
+		/*
+		 * If we are reading an SSL request or GSSAPI
+		 * encryption request, we should have no data already
+		 * buffered at this point.  If we do, it was received
+		 * before we performed the SSL or GSSAPI handshake, so
+		 * it wasn't encrypted and indeed may have been
+		 * injected by a man-in-the-middle.  We report this
+		 * case to the client.
+		 */
+		if (pkt.type == PKT_SSLREQ && mbuf_avail_for_read(data) > 0) {
+			disconnect_client(client, true, "received unencrypted data after SSL request");
+			return false;
+		}
+		if (pkt.type == PKT_GSSENCREQ && mbuf_avail_for_read(data) > 0) {
+			disconnect_client(client, true, "received unencrypted data after GSSAPI encryption request");
+			return false;
+		}
 
 		client->request_time = get_cached_time();
 		switch (client->state) {

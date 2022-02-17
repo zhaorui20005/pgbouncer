@@ -48,7 +48,7 @@ their probing order:
 | udns                       | yes      | yes       | no         | yes            | IPv4 only                             |
 | evdns, libevent 2.x        | yes      | no        | yes        | no             | does not check /etc/hosts updates     |
 | getaddrinfo_a, glibc 2.9+  | yes      | yes (3)   | yes        | no             | N/A on non-glibc                      |
-| getaddrinfo, libc          | no       | yes (3)   | yes        | no             | N/A on Windows, requires pthreads     |
+| getaddrinfo, libc          | no       | yes (3)   | yes        | no             | requires pthreads                     |
 
 1. EDNS0 is required to have more than 8 addresses behind one host name.
 2. SOA lookup is needed to re-check host names on zone serial change.
@@ -78,8 +78,9 @@ systemd integration
 -------------------
 
 To enable systemd integration, use the `configure` option
-`--with-systemd`.  This allows using `Type=notify` service units.  See
-`etc/pgbouncer.service` for an example.
+`--with-systemd`.  This allows using `Type=notify` service units as
+well as socket activation.  See `etc/pgbouncer.service` and
+`etc/pgbouncer.socket` for examples.
 
 Building from Git
 -----------------
@@ -121,16 +122,16 @@ Running from the command line goes as usual, except that the `-d` (daemonize),
 `-R` (reboot), and `-u` (switch user) switches will not work.
 
 To run PgBouncer as a Windows service, you need to configure the
-`service_name` parameter to set name for service.  Then:
+`service_name` parameter to set a name for the service.  Then:
 
 	$ pgbouncer -regservice config.ini
 
-To uninstall service:
+To uninstall the service:
 
 	$ pgbouncer -unregservice config.ini
 
 To use the Windows event log, set `syslog = 1` in the configuration file.
-But before that you need to register `pgbevent.dll`:
+But before that, you need to register `pgbevent.dll`:
 
 	$ regsvr32 pgbevent.dll
 

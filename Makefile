@@ -67,10 +67,10 @@ pgbouncer_EMBED_LIBUSUAL = 1
 # docs to install as-is
 dist_doc_DATA = README.md NEWS.md etc/pgbouncer.ini etc/userlist.txt
 
-#DISTCLEANFILES = config.mak config.status lib/usual/config.h config.log
+DISTCLEANFILES = config.mak config.status lib/usual/config.h config.log
 
-#DIST_SUBDIRS = doc test
-#dist_man_MANS = doc/pgbouncer.1 doc/pgbouncer.5
+DIST_SUBDIRS = doc test
+dist_man_MANS = doc/pgbouncer.1 doc/pgbouncer.5
 
 # files in tgz
 EXTRA_DIST = AUTHORS COPYRIGHT Makefile config.mak.in config.sub config.guess \
@@ -135,28 +135,17 @@ check: all
 	etc/optscan.sh
 	$(MAKE) -C test check
 
-w32arch = i686-w64-mingw32
-w32zip = $(PACKAGE_TARNAME)-$(PACKAGE_VERSION)-win32.zip
-zip: configure clean
-	rm -rf buildexe
-	mkdir buildexe
-	cd buildexe \
-		&& ../configure --host=$(w32arch) --disable-debug \
-			--without-openssl \
-			--without-cares \
-			--enable-evdns \
-		&& $(MAKE) \
-		&& $(w32arch)-strip pgbouncer.exe pgbevent.dll \
-		&& zip pgbouncer.zip pgbouncer.exe pgbevent.dll doc/*.html
-	zip -l buildexe/pgbouncer.zip etc/pgbouncer.ini etc/userlist.txt
-	mv buildexe/pgbouncer.zip $(w32zip)
+w32zip = $(PACKAGE_TARNAME)-$(PACKAGE_VERSION)-windows-$(host_cpu).zip
+zip: $(w32zip)
 
-zip-up: $(w32zip)
-	rsync $(w32zip) pgf:web/pgbouncer/htdocs/win32/
-
-tgz = $(PACKAGE_TARNAME)-$(PACKAGE_VERSION).tar.gz
-tgz-up: $(tgz)
-	rsync $(tgz) pgf:web/pgbouncer/htdocs/testing/
+$(w32zip): pgbouncer.exe pgbevent.dll etc/pgbouncer.ini etc/userlist.txt README.md COPYRIGHT
+	rm -rf $(basename $@)
+	mkdir $(basename $@)
+	cp $^ $(basename $@)
+	$(STRIP) $(addprefix $(basename $@)/,$(filter %.exe %.dll,$(^F)))
+	zip -MM $@ $(addprefix $(basename $@)/,$(filter %.exe %.dll,$(^F)))
+# NB: zip -l for text files for end-of-line conversion
+	zip -MM -l $@ $(addprefix $(basename $@)/,$(filter-out %.exe %.dll,$(^F)))
 
 .PHONY: tags
 tags:

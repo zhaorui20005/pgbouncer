@@ -2,7 +2,7 @@
 
 cd $(dirname $0)
 
-rm -rf TestCA1
+rm -rf TestCA1 TestCA2
 
 which psql
 if [ $? -ne 0 ]
@@ -18,6 +18,8 @@ PG_PORT=${PGPORT}
 ./newsite.sh TestCA1 localhost C=QQ O=Org1 L=computer OU=db
 ./newsite.sh TestCA1 bouncer C=QQ O=Org1 L=computer OU=Dev
 ./newsite.sh TestCA1 random C=QQ O=Org1 L=computer OU=Dev
+./newca.sh TestCA2 C=QQ O=Org2 CN="TestCA2"
+./newsite.sh TestCA2 localhost C=QQ O=Org1 L=computer OU=db
 ) > /dev/null
 #export LD_LIBRARY_PATH=/usr/local/pgsql/lib:$LD_LIBRARY_PATH
 #export PATH=/usr/local/pgsql/bin:$PATH
@@ -25,6 +27,8 @@ export PGDATA=$MASTER_DATA_DIRECTORY
 export PGHOST=localhost
 export PGPORT=6667
 export EF_ALLOW_MALLOC_0=1
+export LC_ALL=C
+export POSIXLY_CORRECT=1
 
 mkdir -p tmp
 
@@ -69,20 +73,11 @@ stopit() {
 }
 
 stopit test.pid
-stopit pgdata/postmaster.pid
 
 mkdir -p $LOGDIR
 rm -f $BOUNCER_LOG $PG_LOG
-#rm -rf $PGDATA
 
 if [  -d $PGDATA ]; then
-	#echo "initdb"
-	#mkdir $PGDATA
-	#initdb --nosync >> $PG_LOG 2>&1
-	#sed -r -i "/unix_socket_director/s:.*(unix_socket_director.*=).*:\\1 '/tmp':" pgdata/postgresql.conf
-	#echo "port = $PG_PORT" >> pgdata/postgresql.conf
-	#echo "log_connections = on" >> ${PGDATA}/postgresql.conf
-	#echo "log_disconnections = on" >> ${PGDATA}/postgresql.conf
 	cp ${PGDATA}/postgresql.conf ${PGDATA}/postgresql.conf.orig
 	cp ${PGDATA}/pg_hba.conf ${PGDATA}/pg_hba.conf.orig
 	cp ${PGDATA}/pg_ident.conf ${PGDATA}/pg_ident.conf.orig
@@ -100,8 +95,6 @@ if [  -d $PGDATA ]; then
 	chmod 600 tmp/userlist.txt
 
 fi
-
-# pgctl start
 
 echo "createdb"
 psql -X -p $PG_PORT -l | grep p0 > /dev/null || {
@@ -155,7 +148,7 @@ die() {
 }
 
 admin() {
-	psql -X -h /tmp -U pgbouncer pgbouncer -c "$@;" || die "Cannot contact bouncer!"
+	psql -X -h /tmp -U pgbouncer -d pgbouncer -c "$@;" || die "Cannot contact bouncer!"
 }
 
 runtest() {
@@ -167,6 +160,14 @@ runtest() {
 	printf "`date` running $1 ... "
 	eval $1 >$LOGDIR/$1.out 2>&1
 	status=$?
+
+	# Detect fatal errors from PgBouncer (which are internal
+	# errors), but not those from PostgreSQL (which could be
+	# normal, such as authentication failures)
+	if grep 'FATAL @' $BOUNCER_LOG >> $LOGDIR/$1.out; then
+		status=1
+	fi
+
 	if [ $status -eq 0 ]; then
 		echo "ok"
 	elif [ $status -eq 77 ]; then
@@ -202,6 +203,42 @@ test_server_ssl() {
 	echo "hostssl all all 127.0.0.1/32 trust" >> ${PGDATA}/pg_hba.conf
 	echo "hostssl all all ::1/128 trust" >> ${PGDATA}/pg_hba.conf
 	reconf_pgsql "ssl=on"
+	psql_bouncer -q -d p0 -c "select 'ssl-connect'" | tee tmp/test.tmp0
+	grep -q "ssl-connect"  tmp/test.tmp0
+	rc=$?
+	return $rc
+}
+
+test_server_ssl_set_disable() {
+	reconf_bouncer "auth_type = trust" "server_tls_sslmode = require"
+	echo "hostssl all all 127.0.0.1/32 trust" > ${PGDATA}/pg_hba.conf
+	echo "hostssl all all ::1/128 trust" >> ${PGDATA}/pg_hba.conf
+	reconf_pgsql "ssl=on" "ssl_ca_file='root.crt'"
+	psql_bouncer -q -d p0 -c "select 'ssl-connect'" | tee tmp/test.tmp0
+	grep -q "ssl-connect"  tmp/test.tmp0 || return 1
+	sed s/ssl/nossl/g ${PGDATA}/pg_hba.conf > tmp/pg_hba2.conf
+	mv tmp/pg_hba2.conf ${PGDATA}/pg_hba.conf
+	pg_ctl reload
+	admin "reconnect"
+	admin "set server_tls_sslmode=disable"
+	psql_bouncer -q -d p0 -c "select 'ssl-connect'" | tee tmp/test.tmp0
+	grep -q "ssl-connect"  tmp/test.tmp0
+	rc=$?
+	return $rc
+}
+
+test_server_ssl_set_enable() {
+	reconf_bouncer "auth_type = trust" "server_tls_sslmode = disable"
+	echo "hostnossl all all 127.0.0.1/32 trust" > ${PGDATA}/pg_hba.conf
+	echo "hostnossl all all ::1/128 trust" >> ${PGDATA}/pg_hba.conf
+	reconf_pgsql "ssl=on" "ssl_ca_file='root.crt'"
+	psql_bouncer -q -d p0 -c "select 'ssl-connect'" | tee tmp/test.tmp0
+	grep -q "ssl-connect"  tmp/test.tmp0 || return 1
+	sed s/nossl/ssl/g ${PGDATA}/pg_hba.conf > tmp/pg_hba2.conf
+	mv tmp/pg_hba2.conf ${PGDATA}/pg_hba.conf
+	pg_ctl reload
+	admin "reconnect"
+	admin "set server_tls_sslmode=require"
 	psql_bouncer -q -d p0 -c "select 'ssl-connect'" | tee tmp/test.tmp0
 	grep -q "ssl-connect"  tmp/test.tmp0
 	rc=$?
@@ -270,6 +307,175 @@ test_client_ssl_verify() {
 	return $rc
 }
 
+test_client_ssl_set_disable() {
+	reconf_bouncer "auth_type = trust" "server_tls_sslmode = prefer" \
+		"client_tls_sslmode = require" \
+		"client_tls_key_file = TestCA1/sites/01-localhost.key" \
+		"client_tls_cert_file = TestCA1/sites/01-localhost.crt"
+	echo "host all all 127.0.0.1/32 trust" >> ${PGDATA}/pg_hba.conf
+	echo "host all all ::1/128 trust" >> ${PGDATA}/pg_hba.conf
+	reconf_pgsql "ssl=on" "ssl_ca_file='root.crt'"
+	psql_bouncer -q -d "dbname=p0 sslmode=verify-full sslrootcert=TestCA1/ca.crt" -c "select 'client-ssl-connect'" | tee tmp/test.tmp 2>&1
+	grep -q "client-ssl-connect"  tmp/test.tmp || return 1
+	admin "set client_tls_sslmode=disable"
+	psql_bouncer -q -d "dbname=p0 sslmode=disable" -c "select 'client-ssl-disable'" | tee tmp/test.tmp 2>&1
+	grep -q "client-ssl-disable"  tmp/test.tmp
+	rc=$?
+	return $rc
+}
+
+test_client_ssl_set_enable() {
+	reconf_bouncer "auth_type = trust" "server_tls_sslmode = prefer" \
+		"client_tls_sslmode = disable"
+	echo "host all all 127.0.0.1/32 trust" >> ${PGDATA}/pg_hba.conf
+	echo "host all all ::1/128 trust" >> ${PGDATA}/pg_hba.conf
+	reconf_pgsql "ssl=on" "ssl_ca_file='root.crt'"
+	psql_bouncer -q -d "dbname=p0 sslmode=disable" -c "select 'client-ssl-disable'" | tee tmp/test.tmp 2>&1
+	grep -q "client-ssl-disable"  tmp/test.tmp || return 1
+	admin "set client_tls_key_file='TestCA1/sites/01-localhost.key'"
+	admin "set client_tls_cert_file='TestCA1/sites/01-localhost.crt'"
+	admin "set client_tls_sslmode=require"
+	psql_bouncer -q -d "dbname=p0 sslmode=verify-full sslrootcert=TestCA1/ca.crt" -c "select 'client-ssl-connect'" | tee tmp/test.tmp 2>&1
+	grep -q "client-ssl-connect"  tmp/test.tmp
+	rc=$?
+	return $rc
+}
+
+test_client_ssl_set_change_ca() {
+	reconf_bouncer "auth_type = trust" "server_tls_sslmode = prefer" \
+		"client_tls_sslmode = require" \
+		"client_tls_key_file = TestCA1/sites/01-localhost.key" \
+		"client_tls_cert_file = TestCA1/sites/01-localhost.crt"
+	echo "host all all 127.0.0.1/32 trust" > ${PGDATA}/pg_hba.conf
+	echo "host all all ::1/128 trust" >> ${PGDATA}/pg_hba.conf
+	reconf_pgsql "ssl=on" "ssl_ca_file='root.crt'"
+	psql_bouncer -q -d "dbname=p0 sslmode=verify-full sslrootcert=TestCA1/ca.crt" -c "select 'client-ssl-connect'" | tee tmp/test.tmp 2>&1
+	grep -q "client-ssl-connect"  tmp/test.tmp || return 1
+	admin "set client_tls_key_file='TestCA2/sites/01-localhost.key'"
+	admin "set client_tls_cert_file='TestCA2/sites/01-localhost.crt'"
+	psql_bouncer -q -d "dbname=p0 sslmode=verify-full sslrootcert=TestCA2/ca.crt" -c "select 'client-ssl-connect'" | tee tmp/test.tmp 2>&1
+	grep -q "client-ssl-connect"  tmp/test.tmp
+	rc=$?
+	return $rc
+}
+
+test_client_ssl_reload_disable() {
+	reconf_bouncer "auth_type = trust" "server_tls_sslmode = prefer" \
+		"client_tls_key_file = TestCA1/sites/01-localhost.key" \
+		"client_tls_cert_file = TestCA1/sites/01-localhost.crt" \
+		"client_tls_sslmode=require"
+	echo "host all all 127.0.0.1/32 trust" > ${PGDATA}/pg_hba.conf
+	echo "host all all ::1/128 trust" >> ${PGDATA}/pg_hba.conf
+	reconf_pgsql "ssl=on" "ssl_ca_file='root.crt'"
+	psql_bouncer -q -d "dbname=p0 sslmode=verify-full sslrootcert=TestCA1/ca.crt" -c "select 'client-ssl-connect'" | tee tmp/test.tmp 2>&1
+	grep -q "client-ssl-connect"  tmp/test.tmp || return 1
+	sed 's/client_tls_sslmode=require/client_tls_sslmode=disable/g' tmp/test.ini > tmp/test2.ini
+	mv tmp/test2.ini tmp/test.ini
+	admin "reload"
+	psql_bouncer -q -d "dbname=p0 sslmode=disable" -c "select 'client-ssl-disable'" | tee tmp/test.tmp 2>&1
+	grep -q "client-ssl-disable"  tmp/test.tmp
+	rc=$?
+	return $rc
+}
+
+test_client_ssl_reload_enable() {
+	reconf_bouncer "auth_type = trust" "server_tls_sslmode = prefer" \
+		"client_tls_key_file = TestCA1/sites/01-localhost.key" \
+		"client_tls_cert_file = TestCA1/sites/01-localhost.crt" \
+		"client_tls_sslmode=disable"
+	echo "host all all 127.0.0.1/32 trust" > ${PGDATA}/pg_hba.conf
+	echo "host all all ::1/128 trust" >> ${PGDATA}/pg_hba.conf
+	reconf_pgsql "ssl=on" "ssl_ca_file='root.crt'"
+	psql_bouncer -q -d "dbname=p0 sslmode=disable" -c "select 'client-ssl-disable'" | tee tmp/test.tmp 2>&1
+	grep -q "client-ssl-disable"  tmp/test.tmp || return 1
+	sed 's/client_tls_sslmode=disable/client_tls_sslmode=require/g' tmp/test.ini > tmp/test2.ini
+	mv tmp/test2.ini tmp/test.ini
+	admin "reload"
+	psql_bouncer -q -d "dbname=p0 sslmode=verify-full sslrootcert=TestCA1/ca.crt" -c "select 'client-ssl-connect'" | tee tmp/test.tmp 2>&1
+	grep -q "client-ssl-connect"  tmp/test.tmp
+	rc=$?
+	return $rc
+}
+
+test_client_ssl_reload_change_ca() {
+	reconf_bouncer "auth_type = trust" "server_tls_sslmode = prefer" \
+		"client_tls_sslmode = require" \
+		"client_tls_key_file = TestCA1/sites/01-localhost.key" \
+		"client_tls_cert_file = TestCA1/sites/01-localhost.crt"
+	echo "host all all 127.0.0.1/32 trust" > ${PGDATA}/pg_hba.conf
+	echo "host all all ::1/128 trust" >> ${PGDATA}/pg_hba.conf
+	reconf_pgsql "ssl=on" "ssl_ca_file='root.crt'"
+	psql_bouncer -q -d "dbname=p0 sslmode=verify-full sslrootcert=TestCA1/ca.crt" -c "select 'client-ssl-connect'" | tee tmp/test.tmp 2>&1
+	grep -q "client-ssl-connect"  tmp/test.tmp || return 1
+	sed 's/TestCA1/TestCA2/g' tmp/test.ini > tmp/test2.ini
+	mv tmp/test2.ini tmp/test.ini
+	admin "reload"
+	psql_bouncer -q -d "dbname=p0 sslmode=verify-full sslrootcert=TestCA2/ca.crt" -c "select 'client-ssl-connect'" | tee tmp/test.tmp 2>&1
+	grep -q "client-ssl-connect"  tmp/test.tmp
+	rc=$?
+	return $rc
+}
+
+test_client_ssl_sighup_disable() {
+	reconf_bouncer "auth_type = trust" "server_tls_sslmode = prefer" \
+		"client_tls_key_file = TestCA1/sites/01-localhost.key" \
+		"client_tls_cert_file = TestCA1/sites/01-localhost.crt" \
+		"client_tls_sslmode=require"
+	echo "host all all 127.0.0.1/32 trust" > ${PGDATA}/pg_hba.conf
+	echo "host all all ::1/128 trust" >> ${PGDATA}/pg_hba.conf
+	reconf_pgsql "ssl=on" "ssl_ca_file='root.crt'"
+	psql_bouncer -q -d "dbname=p0 sslmode=verify-full sslrootcert=TestCA1/ca.crt" -c "select 'client-ssl-connect'" | tee tmp/test.tmp 2>&1
+	grep -q "client-ssl-connect"  tmp/test.tmp || return 1
+	sed 's/client_tls_sslmode=require/client_tls_sslmode=disable/g' tmp/test.ini > tmp/test2.ini
+	mv tmp/test2.ini tmp/test.ini
+	kill -HUP `cat test.pid`
+	sleep 1
+	psql_bouncer -q -d "dbname=p0 sslmode=disable" -c "select 'client-ssl-disable'" | tee tmp/test.tmp 2>&1
+	grep -q "client-ssl-disable"  tmp/test.tmp
+	rc=$?
+	return $rc
+}
+
+test_client_ssl_sighup_enable() {
+	reconf_bouncer "auth_type = trust" "server_tls_sslmode = prefer" \
+		"client_tls_key_file = TestCA1/sites/01-localhost.key" \
+		"client_tls_cert_file = TestCA1/sites/01-localhost.crt" \
+		"client_tls_sslmode=disable"
+	echo "host all all 127.0.0.1/32 trust" > ${PGDATA}/pg_hba.conf
+	echo "host all all ::1/128 trust" >> ${PGDATA}/pg_hba.conf
+	reconf_pgsql "ssl=on" "ssl_ca_file='root.crt'"
+	psql_bouncer -q -d "dbname=p0 sslmode=disable" -c "select 'client-ssl-disable'" | tee tmp/test.tmp 2>&1
+	grep -q "client-ssl-disable"  tmp/test.tmp || return 1
+	sed 's/client_tls_sslmode=disable/client_tls_sslmode=require/g' tmp/test.ini > tmp/test2.ini
+	mv tmp/test2.ini tmp/test.ini
+	kill -HUP `cat test.pid`
+	sleep 1
+	psql_bouncer -q -d "dbname=p0 sslmode=verify-full sslrootcert=TestCA1/ca.crt" -c "select 'client-ssl-connect'" | tee tmp/test.tmp 2>&1
+	grep -q "client-ssl-connect"  tmp/test.tmp
+	rc=$?
+	return $rc
+}
+
+test_client_ssl_sighup_change_ca() {
+	reconf_bouncer "auth_type = trust" "server_tls_sslmode = prefer" \
+		"client_tls_sslmode = require" \
+		"client_tls_key_file = TestCA1/sites/01-localhost.key" \
+		"client_tls_cert_file = TestCA1/sites/01-localhost.crt"
+	echo "host all all 127.0.0.1/32 trust" > ${PGDATA}/pg_hba.conf
+	echo "host all all ::1/128 trust" >> ${PGDATA}/pg_hba.conf
+	reconf_pgsql "ssl=on" "ssl_ca_file='root.crt'"
+	psql_bouncer -q -d "dbname=p0 sslmode=verify-full sslrootcert=TestCA1/ca.crt" -c "select 'client-ssl-connect'" | tee tmp/test.tmp 2>&1
+	grep -q "client-ssl-connect"  tmp/test.tmp || return 1
+	sed 's/TestCA1/TestCA2/g' tmp/test.ini > tmp/test2.ini
+	mv tmp/test2.ini tmp/test.ini
+	kill -HUP `cat test.pid`
+	sleep 1
+	psql_bouncer -q -d "dbname=p0 sslmode=verify-full sslrootcert=TestCA2/ca.crt" -c "select 'client-ssl-connect'" | tee tmp/test.tmp 2>&1
+	grep -q "client-ssl-connect"  tmp/test.tmp
+	rc=$?
+	return $rc
+}
+
 test_client_ssl_auth() {
 	reconf_bouncer "auth_type = cert" "server_tls_sslmode = prefer" \
 		"client_tls_sslmode = verify-full" \
@@ -304,10 +510,21 @@ test_client_ssl_scram() {
 
 testlist="
 test_server_ssl
+test_server_ssl_set_disable
+test_server_ssl_set_enable
 test_server_ssl_verify
 test_server_ssl_pg_auth
 test_client_ssl
 test_client_ssl_verify
+#test_client_ssl_set_disable
+#test_client_ssl_set_enable
+#test_client_ssl_set_change_ca
+#test_client_ssl_reload_disable
+#test_client_ssl_reload_enable
+#test_client_ssl_reload_change_ca
+#test_client_ssl_sighup_disable
+#test_client_ssl_sighup_enable
+#test_client_ssl_sighup_change_ca
 test_client_ssl_auth
 test_client_ssl_scram
 "

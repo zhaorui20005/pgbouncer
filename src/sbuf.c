@@ -74,13 +74,13 @@ static void sbuf_try_resync(SBuf *sbuf, bool release);
 static bool sbuf_wait_for_data(SBuf *sbuf) _MUSTCHECK;
 static void sbuf_main_loop(SBuf *sbuf, bool skip_recv);
 static bool sbuf_call_proto(SBuf *sbuf, int event) /* _MUSTCHECK */;
-static bool sbuf_actual_recv(SBuf *sbuf, unsigned len)  _MUSTCHECK;
+static bool sbuf_actual_recv(SBuf *sbuf, size_t len)  _MUSTCHECK;
 static bool sbuf_after_connect_check(SBuf *sbuf)  _MUSTCHECK;
 static bool handle_tls_handshake(SBuf *sbuf) /* _MUSTCHECK */;
 
 /* regular I/O */
-static int raw_sbufio_recv(struct SBuf *sbuf, void *dst, unsigned int len);
-static int raw_sbufio_send(struct SBuf *sbuf, const void *data, unsigned int len);
+static ssize_t raw_sbufio_recv(struct SBuf *sbuf, void *dst, size_t len);
+static ssize_t raw_sbufio_send(struct SBuf *sbuf, const void *data, size_t len);
 static int raw_sbufio_close(struct SBuf *sbuf);
 static const SBufIO raw_sbufio_ops = {
 	raw_sbufio_recv,
@@ -90,8 +90,8 @@ static const SBufIO raw_sbufio_ops = {
 
 /* I/O over TLS */
 #ifdef USE_TLS
-static int tls_sbufio_recv(struct SBuf *sbuf, void *dst, unsigned int len);
-static int tls_sbufio_send(struct SBuf *sbuf, const void *data, unsigned int len);
+static ssize_t tls_sbufio_recv(struct SBuf *sbuf, void *dst, size_t len);
+static ssize_t tls_sbufio_send(struct SBuf *sbuf, const void *data, size_t len);
 static int tls_sbufio_close(struct SBuf *sbuf);
 static const SBufIO tls_sbufio_ops = {
 	tls_sbufio_recv,
@@ -143,7 +143,7 @@ failed:
 }
 
 /* need to connect() to get a socket */
-bool sbuf_connect(SBuf *sbuf, const struct sockaddr *sa, int sa_len, int timeout_sec)
+bool sbuf_connect(SBuf *sbuf, const struct sockaddr *sa, socklen_t sa_len, time_t timeout_sec)
 {
 	int res, sock;
 	struct timeval timeout;
@@ -505,7 +505,8 @@ static bool sbuf_queue_send(SBuf *sbuf)
  */
 static bool sbuf_send_pending(SBuf *sbuf)
 {
-	int res, avail;
+	int avail;
+	ssize_t res;
 	IOBuf *io = sbuf->io;
 
 	AssertActive(sbuf);
@@ -637,9 +638,9 @@ static void sbuf_try_resync(SBuf *sbuf, bool release)
 }
 
 /* actually ask kernel for more data */
-static bool sbuf_actual_recv(SBuf *sbuf, unsigned len)
+static bool sbuf_actual_recv(SBuf *sbuf, size_t len)
 {
-	int got;
+	ssize_t got;
 	IOBuf *io = sbuf->io;
 	uint8_t *dst = io->buf + io->recv_pos;
 	unsigned avail = iobuf_amount_recv(io);
@@ -818,16 +819,16 @@ failed:
 }
 
 /* send some data to listening socket */
-bool sbuf_answer(SBuf *sbuf, const void *buf, unsigned len)
+bool sbuf_answer(SBuf *sbuf, const void *buf, size_t len)
 {
-	int res;
+	ssize_t res;
 	if (sbuf->sock <= 0)
 		return false;
 	res = sbuf_op_send(sbuf, buf, len);
 	if (res < 0) {
 		log_debug("sbuf_answer: error sending: %s", strerror(errno));
 	} else if ((unsigned)res != len) {
-		log_debug("sbuf_answer: partial send: len=%d sent=%d", len, res);
+		log_debug("sbuf_answer: partial send: len=%zu sent=%zd", len, res);
 	}
 	return (unsigned)res == len;
 }
@@ -836,12 +837,12 @@ bool sbuf_answer(SBuf *sbuf, const void *buf, unsigned len)
  * Standard IO ops.
  */
 
-static int raw_sbufio_recv(struct SBuf *sbuf, void *dst, unsigned int len)
+static ssize_t raw_sbufio_recv(struct SBuf *sbuf, void *dst, size_t len)
 {
 	return safe_recv(sbuf->sock, dst, len, 0);
 }
 
-static int raw_sbufio_send(struct SBuf *sbuf, const void *data, unsigned int len)
+static ssize_t raw_sbufio_send(struct SBuf *sbuf, const void *data, size_t len)
 {
 	return safe_send(sbuf->sock, data, len, 0);
 }
@@ -861,15 +862,23 @@ static int raw_sbufio_close(struct SBuf *sbuf)
 
 #ifdef USE_TLS
 
-static struct tls_config *client_accept_conf;
-static struct tls_config *server_connect_conf;
+/*
+ * These global variables contain the currently applied TLS configurations.
+ * They might differ from the current configuration if there was an error
+ * applying the configured parameters (e.g. cert file not found).
+ */
 static struct tls *client_accept_base;
+static struct tls_config *client_accept_conf;
+int client_accept_sslmode;
+static struct tls_config *server_connect_conf;
+int server_connect_sslmode;
+
 
 /*
  * TLS setup
  */
 
-static void setup_tls(struct tls_config *conf, const char *pfx, int sslmode,
+static bool setup_tls(struct tls_config *conf, const char *pfx, int sslmode,
 		      const char *protocols, const char *ciphers,
 		      const char *keyfile, const char *certfile, const char *cafile,
 		      const char *dheparams, const char *ecdhecurve,
@@ -881,39 +890,51 @@ static void setup_tls(struct tls_config *conf, const char *pfx, int sslmode,
 		err = tls_config_parse_protocols(&protos, protocols);
 		if (err) {
 			log_error("invalid %s_protocols: %s", pfx, protocols);
-		} else {
-			tls_config_set_protocols(conf, protos);
+			return false;
 		}
+		tls_config_set_protocols(conf, protos);
 	}
 	if (*ciphers) {
 		err = tls_config_set_ciphers(conf, ciphers);
-		if (err)
+		if (err) {
 			log_error("invalid %s_ciphers: %s", pfx, ciphers);
+			return false;
+		}
 	}
 	if (*dheparams) {
 		err = tls_config_set_dheparams(conf, dheparams);
-		if (err)
+		if (err) {
 			log_error("invalid %s_dheparams: %s", pfx, dheparams);
+			return false;
+		}
 	}
 	if (*ecdhecurve) {
 		err = tls_config_set_ecdhecurve(conf, ecdhecurve);
-		if (err)
+		if (err) {
 			log_error("invalid %s_ecdhecurve: %s", pfx, ecdhecurve);
+			return false;
+		}
 	}
 	if (*cafile) {
 		err = tls_config_set_ca_file(conf, cafile);
-		if (err)
+		if (err) {
 			log_error("invalid %s_ca_file: %s", pfx, cafile);
+			return false;
+		}
 	}
 	if (*keyfile) {
 		err = tls_config_set_key_file(conf, keyfile);
-		if (err)
+		if (err) {
 			log_error("invalid %s_key_file: %s", pfx, keyfile);
+			return false;
+		}
 	}
 	if (*certfile) {
 		err = tls_config_set_cert_file(conf, certfile);
-		if (err)
+		if (err) {
 			log_error("invalid %s_cert_file: %s", pfx, certfile);
+			return false;
+		}
 	}
 
 	if (does_connect) {
@@ -937,23 +958,42 @@ static void setup_tls(struct tls_config *conf, const char *pfx, int sslmode,
 			tls_config_verify_client_optional(conf);
 		}
 	}
+
+	return true;
 }
 
-void sbuf_tls_setup(void)
+bool sbuf_tls_setup(void)
 {
 	int err;
+	/*
+	 * These variables store the new TLS configurations, based on the latest
+	 * settings provided by the user. Once they have been configured completely
+	 * without errors they are assigned to the globals at the end of this
+	 * function. This way the globals never contain partially configured TLS
+	 * configurations.
+	 */
+	struct tls_config *new_client_accept_conf = NULL;
+	struct tls_config *new_server_connect_conf = NULL;
+	struct tls *new_client_accept_base = NULL;
 
 	if (cf_client_tls_sslmode != SSLMODE_DISABLED) {
-		if (!*cf_client_tls_key_file || !*cf_client_tls_cert_file)
-			die("To allow TLS connections from clients, client_tls_key_file and client_tls_cert_file must be set.");
+		if (!*cf_client_tls_key_file || !*cf_client_tls_cert_file) {
+			log_error("To allow TLS connections from clients, client_tls_key_file and client_tls_cert_file must be set.");
+			return false;
+		}
 	}
 	if (cf_auth_type == AUTH_CERT) {
-		if (cf_client_tls_sslmode != SSLMODE_VERIFY_FULL)
-			die("auth_type=cert requires client_tls_sslmode=SSLMODE_VERIFY_FULL");
-		if (*cf_client_tls_ca_file == '\0')
-			die("auth_type=cert requires client_tls_ca_file");
+		if (cf_client_tls_sslmode != SSLMODE_VERIFY_FULL) {
+			log_error("auth_type=cert requires client_tls_sslmode=SSLMODE_VERIFY_FULL");
+			return false;
+		}
+		if (*cf_client_tls_ca_file == '\0') {
+			log_error("auth_type=cert requires client_tls_ca_file");
+			return false;
+		}
 	} else if (cf_client_tls_sslmode > SSLMODE_VERIFY_CA && *cf_client_tls_ca_file == '\0') {
-		die("client_tls_sslmode requires client_tls_ca_file");
+		log_error("client_tls_sslmode requires client_tls_ca_file");
+		return false;
 	}
 
 	err = tls_init();
@@ -961,32 +1001,78 @@ void sbuf_tls_setup(void)
 		fatal("tls_init failed");
 
 	if (cf_server_tls_sslmode != SSLMODE_DISABLED) {
-		server_connect_conf = tls_config_new();
-		if (!server_connect_conf)
-			die("tls_config_new failed 1");
-		setup_tls(server_connect_conf, "server_tls", cf_server_tls_sslmode,
-			  cf_server_tls_protocols, cf_server_tls_ciphers,
-			  cf_server_tls_key_file, cf_server_tls_cert_file,
-			  cf_server_tls_ca_file, "", "", true);
+		new_server_connect_conf = tls_config_new();
+		if (!new_server_connect_conf) {
+			log_error("tls_config_new failed 1");
+			return false;
+		}
+
+		if (!setup_tls(new_server_connect_conf, "server_tls", cf_server_tls_sslmode,
+			       cf_server_tls_protocols, cf_server_tls_ciphers,
+			       cf_server_tls_key_file, cf_server_tls_cert_file,
+			       cf_server_tls_ca_file, "", "", true))
+			goto failed;
 	}
 
 	if (cf_client_tls_sslmode != SSLMODE_DISABLED) {
-		client_accept_conf = tls_config_new();
-		if (!client_accept_conf)
-			die("tls_config_new failed 2");
-		setup_tls(client_accept_conf, "client_tls", cf_client_tls_sslmode,
-			  cf_client_tls_protocols, cf_client_tls_ciphers,
-			  cf_client_tls_key_file, cf_client_tls_cert_file,
-			  cf_client_tls_ca_file, cf_client_tls_dheparams,
-			  cf_client_tls_ecdhecurve, false);
+		new_client_accept_conf = tls_config_new();
+		if (!new_client_accept_conf) {
+			log_error("tls_config_new failed 2");
+			goto failed;
+		}
 
-		client_accept_base = tls_server();
-		if (!client_accept_base)
-			die("server_base failed");
-		err = tls_configure(client_accept_base, client_accept_conf);
-		if (err)
-			die("TLS setup failed: %s", tls_error(client_accept_base));
+		if (!setup_tls(new_client_accept_conf, "client_tls", cf_client_tls_sslmode,
+			       cf_client_tls_protocols, cf_client_tls_ciphers,
+			       cf_client_tls_key_file, cf_client_tls_cert_file,
+			       cf_client_tls_ca_file, cf_client_tls_dheparams,
+			       cf_client_tls_ecdhecurve, false))
+			goto failed;
+
+		new_client_accept_base = tls_server();
+		if (!new_client_accept_base) {
+			log_error("server_base failed");
+			goto failed;
+		}
+		err = tls_configure(new_client_accept_base, new_client_accept_conf);
+		if (err) {
+			log_error("TLS setup failed: %s", tls_error(new_client_accept_base));
+			goto failed;
+		}
 	}
+
+	/*
+	 * To change server TLS settings all connections are marked as dirty. This
+	 * way they are recycled and the new TLS settings will be used. Otherwise
+	 * old TLS settings, possibly less secure, could be used for old
+	 * connections indefinitly. If TLS is disabled, and it was disabled before
+	 * as well then recycling connections is not necessary, since we know none
+	 * of the settings have changed. In all other cases we recycle the
+	 * connections to be on the safe side, even though it's possible nothing
+	 * has changed.
+	 */
+	if (server_connect_conf || new_server_connect_conf) {
+		struct List *item;
+		PgPool *pool;
+		statlist_for_each(item, &pool_list) {
+			pool = container_of(item, PgPool, head);
+			tag_pool_dirty(pool);
+		}
+	}
+
+	tls_free(client_accept_base);
+	tls_config_free(client_accept_conf);
+	tls_config_free(server_connect_conf);
+	client_accept_base = new_client_accept_base;
+	client_accept_conf = new_client_accept_conf;
+	client_accept_sslmode = cf_client_tls_sslmode;
+	server_connect_conf = new_server_connect_conf;
+	server_connect_sslmode = cf_server_tls_sslmode;
+	return true;
+failed:
+	tls_free(new_client_accept_base);
+	tls_config_free(new_client_accept_conf);
+	tls_config_free(new_server_connect_conf);
+	return false;
 }
 
 /*
@@ -1088,7 +1174,7 @@ bool sbuf_tls_connect(SBuf *sbuf, const char *hostname)
  * TLS IO ops.
  */
 
-static int tls_sbufio_recv(struct SBuf *sbuf, void *dst, unsigned int len)
+static ssize_t tls_sbufio_recv(struct SBuf *sbuf, void *dst, size_t len)
 {
 	ssize_t out = 0;
 
@@ -1098,7 +1184,7 @@ static int tls_sbufio_recv(struct SBuf *sbuf, void *dst, unsigned int len)
 	}
 
 	out = tls_read(sbuf->tls, dst, len);
-	log_noise("tls_read: req=%u out=%d", len, (int)out);
+	log_noise("tls_read: req=%zu out=%zd", len, out);
 	if (out >= 0) {
 		return out;
 	} else if (out == TLS_WANT_POLLIN) {
@@ -1113,7 +1199,7 @@ static int tls_sbufio_recv(struct SBuf *sbuf, void *dst, unsigned int len)
 	return -1;
 }
 
-static int tls_sbufio_send(struct SBuf *sbuf, const void *data, unsigned int len)
+static ssize_t tls_sbufio_send(struct SBuf *sbuf, const void *data, size_t len)
 {
 	ssize_t out;
 
@@ -1123,7 +1209,7 @@ static int tls_sbufio_send(struct SBuf *sbuf, const void *data, unsigned int len
 	}
 
 	out = tls_write(sbuf->tls, data, len);
-	log_noise("tls_write: req=%u out=%d", len, (int)out);
+	log_noise("tls_write: req=%zu out=%zd", len, out);
 	if (out >= 0) {
 		return out;
 	} else if (out == TLS_WANT_POLLOUT) {
@@ -1165,7 +1251,10 @@ void sbuf_cleanup(void)
 
 #else
 
-void sbuf_tls_setup(void) { }
+int client_accept_sslmode = SSLMODE_DISABLED;
+int server_connect_sslmode = SSLMODE_DISABLED;
+
+bool sbuf_tls_setup(void) { return true; }
 bool sbuf_tls_accept(SBuf *sbuf) { return false; }
 bool sbuf_tls_connect(SBuf *sbuf, const char *hostname) { return false; }
 

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Notes:
 # - uses iptables and -F with some tests, probably not very friendly to your firewall
@@ -6,7 +6,7 @@
 cd $(dirname $0)
 
 # set up gpdb source env
-# START
+### START ###
 which psql
 if [ $? -ne 0 ]
 then
@@ -26,12 +26,13 @@ fi
 # replace port in test.ini
 cp test.ini test.ini.orig
 sed -i "s/PGPORT/${PG_PORT}/" test.ini
-# END
+### END ###
 
-export PGHOST=localhost
+export PGHOST=127.0.0.1
 export PGPORT=6667
 export EF_ALLOW_MALLOC_0=1
-export LANG=C
+export LC_ALL=C
+export POSIXLY_CORRECT=1
 
 BOUNCER_LOG=test.log
 BOUNCER_INI=test.ini
@@ -39,11 +40,10 @@ BOUNCER_PID=test.pid
 BOUNCER_PORT=`sed -n '/^listen_port/s/listen_port.*=[^0-9]*//p' $BOUNCER_INI`
 BOUNCER_EXE="$BOUNCER_EXE_PREFIX ../pgbouncer"
 
+BOUNCER_ADMIN_HOST=/tmp
+
 LOGDIR=log
 NC_PORT=6668
-# PG_PORT is defined above
-# PG_PORT=6666
-PG_LOG=$LOGDIR/pg.log
 
 # gpdb doesn't support alter system, so use the following function to reconfig it
 reconf_pgsql() {
@@ -52,10 +52,9 @@ reconf_pgsql() {
 		echo "$ln" >> ${PGDATA}/postgresql.conf
 	done
 	gpstop  -u
-	#pg_ctl restart -w -t 3 -D $MASTER_DATA_DIRECTORY
 }
 
-
+# not used
 pgctl() {
 	pg_ctl -w -o "-p $PG_PORT" -D $PGDATA $@ >>$PG_LOG 2>&1
 }
@@ -67,11 +66,36 @@ which initdb > /dev/null || {
 	exit 1
 }
 
+# The tests require that psql can connect to the PgBouncer admin
+# console.  On platforms that have getpeereid(), this works by
+# connecting as user pgbouncer over the Unix socket.  On other
+# platforms, we have to rely on "trust" authentication, but then we
+# have to skip any tests that use authentication methods other than
+# "trust".
+case `uname` in
+	MINGW*)
+		have_getpeereid=false
+		use_unix_sockets=false
+		;;
+	*)
+		have_getpeereid=true
+		use_unix_sockets=true
+		;;
+esac
+
 # System configuration checks
 SED_ERE_OP='-E'
 case `uname` in
 Linux)
 	SED_ERE_OP='-r'
+	;;
+esac
+
+case `uname` in
+MINGW*)
+	createdb() { createdb.exe "$@"; }
+	initdb() { initdb.exe "$@"; }
+	psql() { psql.exe "$@"; }
 	;;
 esac
 
@@ -82,10 +106,22 @@ else
 	pg_supports_scram=false
 fi
 
+if ! $use_unix_sockets; then
+	BOUNCER_ADMIN_HOST=/tmp
+
+	cp test.ini test.ini.bak
+	sed -i 's/^unix_socket_dir =/#&/' test.ini
+	echo 'admin_users = pgbouncer' >> test.ini
+fi
+
+MAX_PASSWORD=$(sed -n $SED_ERE_OP 's/#define MAX_PASSWORD[[:space:]]+([0-9]+)/\1/p' ../include/bouncer.h)
+long_password=$(printf '%*s' $(($MAX_PASSWORD - 1)) | tr ' ' 'a')
+
 # System configuration checks
 if ! grep -q "^\"${USER:=$(id -un)}\"" userlist.txt; then
 	cp userlist.txt userlist.txt.bak
 	echo "\"${USER}\" \"01234\"" >> userlist.txt
+	echo "\"longpass\" \"${long_password}\"" >> userlist.txt
 fi
 
 if test -n "$USE_SUDO"; then
@@ -115,44 +151,41 @@ stopit() {
 }
 
 stopit test.pid
-#stopit pgdata/postmaster.pid
 
 mkdir -p $LOGDIR
-rm -f $BOUNCER_LOG $PG_LOG
+rm -f $BOUNCER_LOG
 # suppose gpdb has been started
-# rm -rf $PGDATA
 
-#if [ ! -d $PGDATA ]; then
-	# mkdir $PGDATA
-	# initdb --nosync >> $PG_LOG 2>&1
+if $use_unix_sockets; then
 	sed $SED_ERE_OP -i "/unix_socket_director/s:.*(unix_socket_director.*=).*:\\1 '/tmp':" ${PGDATA}/postgresql.conf
-	cat >>${PGDATA}/postgresql.conf <<-EOF
-	log_connections = on
+fi
+cat >>${PGDATA}/postgresql.conf <<-EOF
+log_connections = on
+EOF
+if $pg_supports_scram; then
+	cat >${PGDATA}/pg_hba.conf <<-EOF
+	local  p6   all                scram-sha-256
+	host   p6   all  127.0.0.1/32  scram-sha-256
+	host   p6   all  ::1/128       scram-sha-256
 	EOF
-	if $pg_supports_scram; then
-		cat >${PGDATA}/pg_hba.conf <<-EOF
-		local  p6   all                scram-sha-256
-		host   p6   all  127.0.0.1/32  scram-sha-256
-		host   p6   all  ::1/128       scram-sha-256
-		EOF
-	else
-		cat >${PGDATA}/pg_hba.conf </dev/null
-	fi
-	cat >>${PGDATA}/pg_hba.conf <<-EOF
-	local  p4   all                password
-	host   p4   all  127.0.0.1/32  password
-	host   p4   all  ::1/128       password
-	local  p5   all                md5
-	host   p5   all  127.0.0.1/32  md5
-	host   p5   all  ::1/128       md5
-	local  all  all                trust
-	host   all  all  127.0.0.1/32  trust
-	host   all  all  ::1/128       trust
-	EOF
-	gpstop -u
-#fi
-
-#pgctl start
+else
+	cat >${PGDATA}/pg_hba.conf </dev/null
+fi
+cat >>${PGDATA}/pg_hba.conf <<-EOF
+local  p4   all                password
+host   p4   all  127.0.0.1/32  password
+host   p4   all  ::1/128       password
+local  p5   all                md5
+host   p5   all  127.0.0.1/32  md5
+host   p5   all  ::1/128       md5
+local  all  all                trust
+host   all  all  127.0.0.1/32  trust
+host   all  all  ::1/128       trust
+EOF
+gpstop -u
+if ! $use_unix_sockets; then
+	sed -i 's/^local/#local/' pgdata/pg_hba.conf
+fi
 
 echo "Creating databases"
 psql -X -p $PG_PORT -l | grep p0 > /dev/null || {
@@ -167,12 +200,15 @@ psql -X -p $PG_PORT -d p0 -c "select * from pg_user" | grep pswcheck > /dev/null
 	psql -X -o /dev/null -p $PG_PORT -c "create user pswcheck with superuser createdb password 'pgbouncer-check';" p0 || exit 1
 	psql -X -o /dev/null -p $PG_PORT -c "create user someuser with password 'anypasswd';" p0 || exit 1
 	psql -X -o /dev/null -p $PG_PORT -c "create user maxedout;" p0 || exit 1
+	psql -X -o /dev/null -p $PG_PORT -c "create user longpass with password '$long_password';" p0 || exit 1
 	if $pg_supports_scram; then
 		psql -X -o /dev/null -p $PG_PORT -c "set password_encryption = 'md5'; create user muser1 password 'foo';" p0 || exit 1
 		psql -X -o /dev/null -p $PG_PORT -c "set password_encryption = 'md5'; create user muser2 password 'wrong';" p0 || exit 1
 		psql -X -o /dev/null -p $PG_PORT -c "set password_encryption = 'md5'; create user puser1 password 'foo';" p0 || exit 1
 		psql -X -o /dev/null -p $PG_PORT -c "set password_encryption = 'md5'; create user puser2 password 'wrong';" p0 || exit 1
-		psql -X -o /dev/null -p $PG_PORT -c "set password_encryption = 'scram-sha-256'; create user scramuser1 password 'foo';" p0 || exit 1
+		# match SCRAM secret in userlist.txt
+		psql -X -o /dev/null -p $PG_PORT -c "set password_encryption = 'scram-sha-256'; create user scramuser1 password '"'SCRAM-SHA-256$4096:D76gvGUVj9Z4DNiGoabOBg==$RukL0Xo3Ql/2F9FsD7mcQ3GATG2fD3PA71qY1JagGDs=:BhKUwyyivFm7Tq2jDJVXSVRbRDgTWyBilZKgg6DDuYU='"';" p0 || exit 1
+		psql -X -o /dev/null -p $PG_PORT -c "set password_encryption = 'scram-sha-256'; create user scramuser3 password 'baz';" p0 || exit 1
 	else
 		psql -X -o /dev/null -p $PG_PORT -c "set password_encryption = on; create user muser1 password 'foo';" p0 || exit 1
 		psql -X -o /dev/null -p $PG_PORT -c "set password_encryption = on; create user muser2 password 'wrong';" p0 || exit 1
@@ -251,6 +287,7 @@ fw_reset() {
 complete() {
 	test -f $BOUNCER_PID && kill `cat $BOUNCER_PID` >/dev/null 2>&1
 	rm -f $BOUNCER_PID
+	test -e test.ini.bak && mv test.ini.bak test.ini
 	test -e userlist.txt.bak && mv userlist.txt.bak userlist.txt
 	cp ${PGDATA}/postgresql.conf.orig ${PGDATA}/postgresql.conf
 	cp ${PGDATA}/pg_hba.conf.orig ${PGDATA}/pg_hba.conf
@@ -265,18 +302,33 @@ die() {
 }
 
 admin() {
-	psql -X -h /tmp -U pgbouncer -d pgbouncer -c "$@;" || die "Cannot contact bouncer!"
+	psql -X -h $BOUNCER_ADMIN_HOST -U pgbouncer -d pgbouncer -c "$@;" || die "Cannot contact bouncer!"
 }
 
 runtest() {
 	local status
 
-	$BOUNCER_EXE -d $BOUNCER_INI
-	until psql -X -h /tmp -U pgbouncer -d pgbouncer -c "show version" 2>/dev/null 1>&2; do sleep 0.1; done
+	case `uname` in
+	MINGW*)
+		(nohup $BOUNCER_EXE $BOUNCER_INI </dev/null >/dev/null 2>&1 &)
+		;;
+	*)
+		$BOUNCER_EXE -d $BOUNCER_INI
+		;;
+	esac
+	until psql -X -h $BOUNCER_ADMIN_HOST -U pgbouncer -d pgbouncer -c "show version" 2>/dev/null 1>&2; do sleep 0.1; done
 
 	printf "`date` running $1 ... "
 	eval $1 >$LOGDIR/$1.out 2>&1
 	status=$?
+
+	# Detect fatal errors from PgBouncer (which are internal
+	# errors), but not those from PostgreSQL (which could be
+	# normal, such as authentication failures)
+	if grep 'FATAL @' $BOUNCER_LOG >> $LOGDIR/$1.out; then
+		status=1
+	fi
+
 	if [ $status -eq 0 ]; then
 		echo "ok"
 	elif [ $status -eq 77 ]; then
@@ -291,7 +343,15 @@ runtest() {
 	# allow background processing to complete
 	wait
 
-	stopit test.pid
+	case `uname` in
+	MINGW*)
+		psql -X -h $BOUNCER_ADMIN_HOST -U pgbouncer -d pgbouncer -c "shutdown;" 2>/dev/null
+		sleep 1
+		;;
+	*)
+		stopit test.pid
+		;;
+	esac
 	mv $BOUNCER_LOG $LOGDIR/$1.log
 
 	return $status
@@ -300,12 +360,29 @@ runtest() {
 # show version and --version
 test_show_version() {
 	v1=$($BOUNCER_EXE --version | head -n 1) || return 1
-	v2=$(psql -X -tAq -h /tmp -U pgbouncer -d pgbouncer -c "show version;") || return 1
+	v2=$(psql -X -tAq -h $BOUNCER_ADMIN_HOST -U pgbouncer -d pgbouncer -c "show version;") || return 1
 
 	echo "v1=$v1"
 	echo "v2=$v2"
 
 	test x"$v1" = x"$v2"
+}
+
+# test all the show commands
+#
+# This test right now just runs all the commands without checking the
+# output, which would be difficult.  This at least ensures the
+# commands don't completely die.  The output can be manually eyeballed
+# in the test log file.
+test_show() {
+	for what in clients config databases fds help lists pools servers sockets active_sockets stats stats_totals stats_averages users totals mem dns_hosts dns_zones; do
+		    echo "=> show $what;"
+		    psql -X -h $BOUNCER_ADMIN_HOST -U pgbouncer -d pgbouncer -c "show $what;" || return 1
+	done
+
+	psql -X -h $BOUNCER_ADMIN_HOST -U pgbouncer -d pgbouncer -c "show bogus;" && return 1
+
+	return 0
 }
 
 # server_lifetime
@@ -431,7 +508,8 @@ test_server_connect_timeout_establish() {
 	grep "closing because: connect timeout" $BOUNCER_LOG
 	rc=$?
 
-	reconf_pgsql 
+	rm -f ${PGDATA}/postgresql.auto.conf
+	reconf_pgsql
 	sleep 1
 
 	return $rc
@@ -499,6 +577,10 @@ test_max_client_conn() {
 
 # - max pool size
 test_pool_size() {
+	# make existing connections go away
+	psql -X -p $PG_PORT -d postgres -c "select pg_terminate_backend(pid) from pg_stat_activity where usename='bouncer'"
+	until test $(psql -X -p $PG_PORT -d postgres -tAq -c "select count(1) from pg_stat_activity where usename='bouncer'") -eq 0; do sleep 0.1; done
+
 	docount() {
 		for i in {1..10}; do
 			psql -X -c "select pg_sleep(0.5)" $1 >/dev/null &
@@ -511,7 +593,65 @@ test_pool_size() {
 	test `docount p0` -eq 2 || return 1
 	test `docount p1` -eq 5 || return 1
 
+	# test reload (GH issue #248)
+	admin "set default_pool_size = 7"
+	test `docount p1` -eq 7 || return 1
+
 	return 0
+}
+
+test_min_pool_size() {
+	# make existing connections go away
+	psql -X -p $PG_PORT -d postgres -c "select pg_terminate_backend(pid) from pg_stat_activity where usename='bouncer'"
+	until test $(psql -X -p $PG_PORT -d postgres -tAq -c "select count(1) from pg_stat_activity where usename='bouncer'") -eq 0; do sleep 0.1; done
+
+	# default_pool_size=5
+	admin "set min_pool_size = 3"
+
+	cnt=`psql -X -p $PG_PORT -tAq -c "select count(1) from pg_stat_activity where usename='bouncer' and datname='p1'" postgres`
+	echo $cnt
+	test "$cnt" -eq 0 || return 1
+
+	# It's a bit tricky to get the timing of this test to work
+	# robustly: Full maintenance runs three times a second, so we
+	# need to wait at least 1/3 seconds for it to notice for sure
+	# that the pool is in use.  When it does, it will launch one
+	# connection per round, so we need to wait at least 3 * 1/3
+	# second before all the min pool connections are launched.
+	# Also, we need to keep the query running while this is
+	# happening so that the pool doesn't become momentarily
+	# unused.
+	psql -X -c "select pg_sleep(2)" p1 &
+	sleep 2
+
+	cnt=`psql -X -p $PG_PORT -tAq -c "select count(1) from pg_stat_activity where usename='bouncer' and datname='p1'" postgres`
+	echo $cnt
+	test "$cnt" -eq 3 || return 1
+}
+
+test_reserve_pool_size() {
+	# make existing connections go away
+	psql -X -p $PG_PORT -d postgres -c "select pg_terminate_backend(pid) from pg_stat_activity where usename='bouncer'"
+	until test $(psql -X -p $PG_PORT -d postgres -tAq -c "select count(1) from pg_stat_activity where usename='bouncer'") -eq 0; do sleep 0.1; done
+
+	# default_pool_size=5
+	admin "set reserve_pool_size = 3"
+
+	for i in {1..8}; do
+		psql -X -c "select pg_sleep(8)" p1 >/dev/null &
+	done
+	sleep 1
+	cnt=`psql -X -p $PG_PORT -tAq -c "select count(1) from pg_stat_activity where usename='bouncer' and datname='p1'" postgres`
+	echo $cnt
+	test "$cnt" -eq 5 || return 1
+
+	sleep 7  # reserve_pool_timeout + wiggle room
+
+	cnt=`psql -X -p $PG_PORT -tAq -c "select count(1) from pg_stat_activity where usename='bouncer' and datname='p1'" postgres`
+	echo $cnt
+	test "$cnt" -eq 8 || return 1
+
+	grep "taking connection from reserve_pool" $BOUNCER_LOG || return 1
 }
 
 test_max_db_connections() {
@@ -557,6 +697,8 @@ test_max_user_connections() {
 test_online_restart() {
 # max_client_conn=10
 # default_pool_size=5
+	$have_getpeereid || return 77
+
 	for i in {1..5}; do
 		echo "`date` attempt $i"
 
@@ -601,7 +743,7 @@ test_suspend_resume() {
 	done &
 
 	for i in {1..5}; do
-		psql -X -h /tmp -p $BOUNCER_PORT -d pgbouncer -U pgbouncer <<-PSQL_EOF
+		psql -X -h $BOUNCER_ADMIN_HOST -p $BOUNCER_PORT -d pgbouncer -U pgbouncer <<-PSQL_EOF
 		suspend;
 		\! sleep 1
 		resume;
@@ -635,7 +777,6 @@ test_database_restart() {
 	admin "set server_login_retry=1"
 
 	psql -X -c "select now() as p0_before_restart" p0
-#	pgctl -m fast restart
 	gpstop -ar
 	echo `date` restart 1
 	psql -X -c "select now() as p0_after_restart" p0 || return 1
@@ -647,7 +788,6 @@ test_database_restart() {
 		psql -X -c "select pg_sleep($i)" p1 &
 	done
 
-	#pgctl -m fast restart
 	gpstop -ar
 	echo `date` restart 2
 
@@ -670,7 +810,7 @@ test_database_change() {
 	sed '/^p1 =/s/dbname=p1/dbname=p0/g' test.ini >test2.ini
 	mv test2.ini test.ini
 
-	kill -HUP `cat $BOUNCER_PID`
+	admin "reload"
 
 	sleep 3
 	db2=`psql -X -tAq -c "select current_database()" p1`
@@ -720,6 +860,8 @@ test_fast_close() {
 
 # test wait_close
 test_wait_close() {
+	case `uname` in MINGW*) return 77;; esac # TODO
+
 	(
 		echo "select pg_backend_pid();"
 		sleep 3
@@ -748,11 +890,8 @@ test_wait_close() {
 
 # test auth_user
 test_auth_user() {
-	echo "host all pswcheck 127.0.0.1/32 md5" >> ${PGDATA}/pg_hba.conf
-	echo "host all pswcheck  ::1/128 md5" >> ${PGDATA}/pg_hba.conf
-	echo "host all someuser 127.0.0.1/32 md5" >> ${PGDATA}/pg_hba.conf
-	echo "host all someuser  ::1/128 md5" >> ${PGDATA}/pg_hba.conf
-	gpstop -u
+	$have_getpeereid || return 77
+
 	admin "set auth_type='md5'"
 	curuser=`psql -X -d "dbname=authdb user=someuser password=anypasswd" -tAq -c "select current_user;"`
 	echo "curuser=$curuser"
@@ -790,11 +929,16 @@ test_password_server() {
 	# bad password from auth_file
 	psql -X -c "select 1" p4z && return 1
 
+	# long password from auth_file
+	psql -X -c "select 1" p4l || return 1
+
 	return 0
 }
 
 # test plain-text password authentication from client to PgBouncer
 test_password_client() {
+	$have_getpeereid || return 77
+
 	admin "set auth_type='plain'"
 
 	# test with users that have a plain-text password stored
@@ -803,6 +947,10 @@ test_password_client() {
 	PGPASSWORD=foo psql -X -U puser1 -c "select 1" p1 || return 1
 	# bad password
 	PGPASSWORD=wrong psql -X -U puser2 -c "select 2" p1 && return 1
+	# long password
+	PGPASSWORD=$long_password psql -X -U longpass -c "select 3" p1 || return 1
+	# too long password
+	PGPASSWORD=X$long_password psql -X -U longpass -c "select 4" p1 && return 1
 
 	# test with users that have an md5 password stored
 
@@ -842,6 +990,8 @@ test_md5_server() {
 
 # test md5 authentication from client to PgBouncer
 test_md5_client() {
+	$have_getpeereid || return 77
+
 	admin "set auth_type='md5'"
 
 	# test with users that have a plain-text password stored
@@ -884,6 +1034,7 @@ test_scram_server() {
 
 # test SCRAM authentication from client to PgBouncer
 test_scram_client() {
+	$have_getpeereid || return 77
 	$pg_supports_scram || return 77
 
 	admin "set auth_type='scram-sha-256'"
@@ -922,25 +1073,265 @@ test_scram_client() {
 	return 0
 }
 
-# test all the show commands
-#
-# This test right now just runs all the commands without checking the
-# output, which would be difficult.  This at least ensures the
-# commands don't completely die.  The output can be manually eyeballed
-# in the test log file.
-test_show() {
-	for what in clients config databases fds help lists pools servers sockets active_sockets stats stats_totals stats_averages users totals mem dns_hosts dns_zones; do
-		    echo "=> show $what;"
-		    psql -X -h /tmp -U pgbouncer -d pgbouncer -c "show $what;" || return 1
-	done
+# test SCRAM authentication from client to PgBouncer and on to server
+test_scram_both() {
+	$have_getpeereid || return 77
+	$pg_supports_scram || return 77
 
-	psql -X -h /tmp -U pgbouncer -d pgbouncer -c "show bogus;" && return 1
+	admin "set auth_type='scram-sha-256'"
+
+	# plain-text password in userlist.txt
+	PGPASSWORD=baz psql -X -U scramuser3 -c "select 1" p61 || return 1
+
+	# SCRAM password in userlist.txt
+	PGPASSWORD=foo psql -X -U scramuser1 -c "select 1" p62 || return 1
+
+	return 0
+}
+
+# test that SCRAM authentication pass-through is preserved by online
+# restart
+#
+# Note: coproc requires bash >=4
+test_scram_takeover() {
+	$have_getpeereid || return 77
+	$pg_supports_scram || return 77
+
+	admin "set auth_type='scram-sha-256'"
+	admin "set pool_mode=transaction"
+	admin "set server_lifetime=3"
+
+	{ coproc { PGPASSWORD=foo psql -X -U scramuser1 -f - -d p62; } >&3; } 3>&1
+
+	echo "select 1;" >&"${COPROC[1]}"
+	sleep 4  # wait for server_lifetime
+
+	$BOUNCER_EXE -d -R $BOUNCER_INI
+	sleep 1
+
+	echo "select 2;" >&"${COPROC[1]}"
+	echo "\q" >&"${COPROC[1]}"
+
+	wait $COPROC_PID
+
+	test $? -eq 0
+}
+
+# Several tests that check the behavior when connecting with a
+# nonexistent user under various authentication types.  Database p1
+# has a forced user, p2 does not; these exercise slightly different
+# code paths.
+
+test_no_user_trust() {
+	admin "set auth_type='trust'"
+
+	psql -X -U nosuchuser1 -c "select 1" p2 && return 1
+	grep -F "closing because: \"trust\" authentication failed" $BOUNCER_LOG || return 1
+
+	return 0
+}
+
+test_no_user_trust_forced_user() {
+	admin "set auth_type='trust'"
+
+	psql -X -U nosuchuser1 -c "select 1" p1 && return 1
+	grep -F "closing because: \"trust\" authentication failed" $BOUNCER_LOG || return 1
+
+	return 0
+}
+
+test_no_user_password() {
+	$have_getpeereid || return 77
+
+	admin "set auth_type='plain'"
+
+	PGPASSWORD=whatever psql -X -U nosuchuser1 -c "select 1" p2 && return 1
+	grep -F "no such user: nosuchuser1" $BOUNCER_LOG || return 1
+	grep -F "closing because: password authentication failed" $BOUNCER_LOG || return 1
+
+	return 0
+}
+
+test_no_user_password_forced_user() {
+	$have_getpeereid || return 77
+
+	admin "set auth_type='plain'"
+
+	PGPASSWORD=whatever psql -X -U nosuchuser1 -c "select 1" p1 && return 1
+	grep -F "no such user: nosuchuser1" $BOUNCER_LOG || return 1
+	grep -F "closing because: password authentication failed" $BOUNCER_LOG || return 1
+
+	return 0
+}
+
+test_no_user_md5() {
+	$have_getpeereid || return 77
+
+	admin "set auth_type='md5'"
+
+	PGPASSWORD=whatever psql -X -U nosuchuser1 -c "select 1" p2 && return 1
+	grep -F "no such user: nosuchuser1" $BOUNCER_LOG || return 1
+	grep -F "closing because: password authentication failed" $BOUNCER_LOG || return 1
+
+	return 0
+}
+
+test_no_user_md5_forced_user() {
+	$have_getpeereid || return 77
+
+	admin "set auth_type='md5'"
+
+	PGPASSWORD=whatever psql -X -U nosuchuser1 -c "select 1" p1 && return 1
+	grep -F "no such user: nosuchuser1" $BOUNCER_LOG || return 1
+	grep -F "closing because: password authentication failed" $BOUNCER_LOG || return 1
+
+	return 0
+}
+
+test_no_user_scram() {
+	$have_getpeereid || return 77
+	$pg_supports_scram || return 77
+
+	admin "set auth_type='scram-sha-256'"
+
+	PGPASSWORD=whatever psql -X -U nosuchuser1 -c "select 1" p2 && return 1
+	grep -F "no such user: nosuchuser1" $BOUNCER_LOG || return 1
+	grep -F "closing because: SASL authentication failed" $BOUNCER_LOG || return 1
+
+	return 0
+}
+
+test_no_user_scram_forced_user() {
+	$have_getpeereid || return 77
+	$pg_supports_scram || return 77
+
+	admin "set auth_type='scram-sha-256'"
+
+	PGPASSWORD=whatever psql -X -U nosuchuser1 -c "select 1" p1 && return 1
+	grep -F "no such user: nosuchuser1" $BOUNCER_LOG || return 1
+	grep -F "closing because: SASL authentication failed" $BOUNCER_LOG || return 1
+
+	return 0
+}
+
+test_no_user_auth_user() {
+	$have_getpeereid || return 77
+
+	admin "set auth_type='md5'"
+
+	PGPASSWORD=whatever psql -X -U nosuchuser1 -c "select 1" authdb && return 1
+	# Currently no mock authentication when using
+	# auth_query/auth_user.  See TODO in
+	# handle_auth_query_response().
+	grep -F "closing because: no such user (age" $BOUNCER_LOG || return 1
+
+	return 0
+}
+
+test_auto_database() {
+	cp test.ini test.ini.bak
+	sed 's/^;\*/*/g' test.ini >test2.ini
+	mv test2.ini test.ini
+
+	admin "reload"
+
+	psql -X -d p7 -c "select current_database()"
+	status1=$?
+	grep -F "registered new auto-database" $BOUNCER_LOG
+	status2=$?
+
+	cp test.ini.bak test.ini
+	rm test.ini.bak
+
+	test $status1 -eq 0 -a $status2 -eq 0
+	return 0
+}
+
+test_cancel() {
+	case `uname` in MINGW*) return 77;; esac
+
+	psql -X -d p3 -c "select pg_sleep(20)" &
+	psql_pid=$!
+	sleep 1
+	kill -INT $psql_pid
+	wait $psql_pid
+	test $? -ne 0 || return 1
+
+	return 0
+}
+
+# Test for waiting connections handling for cancel requests.
+#
+# The bug fixed by GH PR #542 was: When the connection pool is full,
+# cancel requests cannot get through (that is normal), but then when
+# unused connections close and pool slots are available, those are not
+# used for waiting cancel requests.
+test_cancel_wait() {
+	case `uname` in MINGW*) return 77;; esac
+
+	# default_pool_size=5
+	admin "set server_idle_timeout=2"
+
+	psql -X -d p3 -c "select pg_sleep(20)" &
+	psql_pid=$!
+	psql -X -d p3 -c "select pg_sleep(2)" &
+	psql -X -d p3 -c "select pg_sleep(2)" &
+	psql -X -d p3 -c "select pg_sleep(2)" &
+	psql -X -d p3 -c "select pg_sleep(2)" &
+	sleep 1
+
+	# This cancel must wait for a pool slot to become free.
+	kill -INT $psql_pid
+
+	wait $psql_pid
+
+	# Prior to the bug fix, the cancel would never get through and
+	# the first psql would simply run the full sleep and exit
+	# successfully.
+	test $? -ne 0 || return 1
+
+	return 0
+}
+
+# Test that cancel requests can exceed the pool size
+#
+# Cancel request connections can use twice the pool size.  See also GH
+# PR #543.
+test_cancel_pool_size() {
+	case `uname` in MINGW*) return 77;; esac
+
+	# default_pool_size=5
+	admin "set server_idle_timeout=2"
+
+	psql -X -d p3 -c "select pg_sleep(20)" &
+	psql1_pid=$!
+	psql -X -d p3 -c "select pg_sleep(20)" &
+	psql2_pid=$!
+	psql -X -d p3 -c "select pg_sleep(20)" &
+	psql3_pid=$!
+	psql -X -d p3 -c "select pg_sleep(20)" &
+	psql4_pid=$!
+	psql -X -d p3 -c "select pg_sleep(20)" &
+	psql5_pid=$!
+	sleep 1
+
+	# These cancels requires more connections than the
+	# default_pool_size=5.
+	kill -INT $psql1_pid $psql2_pid $psql3_pid $psql4_pid $psql5_pid
+
+	wait $psql1_pid
+
+	# Prior to the change fix, the cancels would never get through
+	# and the psql processes would simply run the full sleep and
+	# exit successfully.
+	test $? -ne 0 || return 1
 
 	return 0
 }
 
 testlist="
 test_show_version
+test_show
 test_server_login_retry
 test_auth_user
 test_client_idle_timeout
@@ -954,6 +1345,8 @@ test_server_check_delay
 test_tcp_user_timeout
 test_max_client_conn
 test_pool_size
+test_min_pool_size
+test_reserve_pool_size
 test_max_db_connections
 test_max_user_connections
 test_online_restart
@@ -971,7 +1364,21 @@ test_md5_server
 test_md5_client
 test_scram_server
 test_scram_client
-test_show
+test_scram_both
+test_scram_takeover
+test_no_user_trust
+test_no_user_trust_forced_user
+test_no_user_password
+test_no_user_password_forced_user
+test_no_user_md5
+test_no_user_md5_forced_user
+test_no_user_scram
+test_no_user_scram_forced_user
+test_no_user_auth_user
+test_auto_database
+test_cancel
+test_cancel_wait
+test_cancel_pool_size
 "
 
 if [ $# -gt 0 ]; then

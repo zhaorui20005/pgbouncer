@@ -46,6 +46,12 @@ static void usage(const char *exe)
 	printf("  -V, --version        show version, then exit\n");
 	printf("  -h, --help           show this help, then exit\n");
 	printf("\n");
+#ifdef WIN32
+	printf("Windows service registration:\n");
+	printf("  --regservice CONFIG_FILE [-U USERNAME [-P PASSWORD]]\n");
+	printf("  --unregservice CONFIG_FILE\n");
+	printf("\n");
+#endif
 	printf("Report bugs to <%s>.\n", PACKAGE_BUGREPORT);
 	//printf("%s home page: <%s>\n", PACKAGE_NAME, PACKAGE_URL);
 	exit(0);
@@ -208,78 +214,100 @@ const struct CfLookup sslmode_map[] = {
 	{ NULL }
 };
 
+/*
+ * Add new parameters in alphabetical order. This order is used by SHOW CONFIG.
+ */
 static const struct CfKey bouncer_params [] = {
-CF_ABS("job_name", CF_STR, cf_jobname, CF_NO_RELOAD, "pgbouncer"),
-#ifdef WIN32
-CF_ABS("service_name", CF_STR, cf_jobname, CF_NO_RELOAD, NULL), /* alias for job_name */
-#endif
-CF_ABS("conffile", CF_STR, cf_config_file, 0, NULL),
-CF_ABS("logfile", CF_STR, cf_logfile, 0, ""),
-CF_ABS("pidfile", CF_STR, cf_pidfile, CF_NO_RELOAD, ""),
-CF_ABS("listen_addr", CF_STR, cf_listen_addr, CF_NO_RELOAD, ""),
-CF_ABS("listen_port", CF_INT, cf_listen_port, CF_NO_RELOAD, "6432"),
-CF_ABS("so_reuseport", CF_INT, cf_so_reuseport, CF_NO_RELOAD, "0"),
-CF_ABS("listen_backlog", CF_INT, cf_listen_backlog, CF_NO_RELOAD, "128"),
-#ifndef WIN32
-CF_ABS("unix_socket_dir", CF_STR, cf_unix_socket_dir, CF_NO_RELOAD, "/tmp"),
-CF_ABS("unix_socket_mode", CF_INT, cf_unix_socket_mode, CF_NO_RELOAD, "0777"),
-CF_ABS("unix_socket_group", CF_STR, cf_unix_socket_group, CF_NO_RELOAD, ""),
-#endif
-CF_ABS("auth_type", CF_LOOKUP(auth_type_map), cf_auth_type, 0, "md5"),
+CF_ABS("admin_users", CF_STR, cf_admin_users, 0, ""),
+CF_ABS("application_name_add_host", CF_INT, cf_application_name_add_host, 0, "0"),
 CF_ABS("auth_file", CF_STR, cf_auth_file, 0, NULL),
 CF_ABS("auth_hba_file", CF_STR, cf_auth_hba_file, 0, ""),
-CF_ABS("auth_user", CF_STR, cf_auth_user, 0, NULL),
 CF_ABS("auth_query", CF_STR, cf_auth_query, 0, "SELECT usename, passwd FROM pg_shadow WHERE usename=$1"),
-CF_ABS("pool_mode", CF_LOOKUP(pool_mode_map), cf_pool_mode, 0, "session"),
-CF_ABS("max_client_conn", CF_INT, cf_max_client_conn, 0, "100"),
-CF_ABS("default_pool_size", CF_INT, cf_default_pool_size, 0, "20"),
-CF_ABS("min_pool_size", CF_INT, cf_min_pool_size, 0, "0"),
-CF_ABS("reserve_pool_size", CF_INT, cf_res_pool_size, 0, "0"),
-CF_ABS("reserve_pool_timeout", CF_TIME_USEC, cf_res_pool_timeout, 0, "5"),
-CF_ABS("max_db_connections", CF_INT, cf_max_db_connections, 0, "0"),
-CF_ABS("max_user_connections", CF_INT, cf_max_user_connections, 0, "0"),
-CF_ABS("syslog", CF_INT, cf_syslog, 0, "0"),
-CF_ABS("syslog_facility", CF_STR, cf_syslog_facility, 0, "daemon"),
-CF_ABS("syslog_ident", CF_STR, cf_syslog_ident, 0, "pgbouncer"),
-#ifndef WIN32
-CF_ABS("user", CF_STR, cf_username, CF_NO_RELOAD, NULL),
-#endif
-
+CF_ABS("auth_type", CF_LOOKUP(auth_type_map), cf_auth_type, 0, "md5"),
+CF_ABS("auth_user", CF_STR, cf_auth_user, 0, NULL),
 CF_ABS("autodb_idle_timeout", CF_TIME_USEC, cf_autodb_idle_timeout, 0, "3600"),
-
-CF_ABS("server_reset_query", CF_STR, cf_server_reset_query, 0, "DISCARD ALL"),
-CF_ABS("server_reset_query_always", CF_INT, cf_server_reset_query_always, 0, "0"),
-CF_ABS("server_check_query", CF_STR, cf_server_check_query, 0, "select 1"),
-CF_ABS("server_check_delay", CF_TIME_USEC, cf_server_check_delay, 0, "30"),
-CF_ABS("server_fast_close", CF_INT, cf_server_fast_close, 0, "0"),
-CF_ABS("query_timeout", CF_TIME_USEC, cf_query_timeout, 0, "0"),
-CF_ABS("query_wait_timeout", CF_TIME_USEC, cf_query_wait_timeout, 0, "120"),
 CF_ABS("client_idle_timeout", CF_TIME_USEC, cf_client_idle_timeout, 0, "0"),
 CF_ABS("client_login_timeout", CF_TIME_USEC, cf_client_login_timeout, 0, "60"),
-CF_ABS("idle_transaction_timeout", CF_TIME_USEC, cf_idle_transaction_timeout, 0, "0"),
-CF_ABS("server_lifetime", CF_TIME_USEC, cf_server_lifetime, 0, "3600"),
-CF_ABS("server_idle_timeout", CF_TIME_USEC, cf_server_idle_timeout, 0, "600"),
-CF_ABS("server_connect_timeout", CF_TIME_USEC, cf_server_connect_timeout, 0, "15"),
-CF_ABS("server_login_retry", CF_TIME_USEC, cf_server_login_retry, 0, "15"),
-CF_ABS("server_round_robin", CF_INT, cf_server_round_robin, 0, "0"),
-CF_ABS("suspend_timeout", CF_TIME_USEC, cf_suspend_timeout, 0, "10"),
-CF_ABS("ignore_startup_parameters", CF_STR, cf_ignore_startup_params, 0, ""),
+CF_ABS("client_tls_ca_file", CF_STR, cf_client_tls_ca_file, 0, ""),
+CF_ABS("client_tls_cert_file", CF_STR, cf_client_tls_cert_file, 0, ""),
+CF_ABS("client_tls_ciphers", CF_STR, cf_client_tls_ciphers, 0, "fast"),
+CF_ABS("client_tls_dheparams", CF_STR, cf_client_tls_dheparams, 0, "auto"),
+CF_ABS("client_tls_ecdhcurve", CF_STR, cf_client_tls_ecdhecurve, 0, "auto"),
+CF_ABS("client_tls_key_file", CF_STR, cf_client_tls_key_file, 0, ""),
+CF_ABS("client_tls_protocols", CF_STR, cf_client_tls_protocols, 0, "secure"),
+CF_ABS("client_tls_sslmode", CF_LOOKUP(sslmode_map), cf_client_tls_sslmode, 0, "disable"),
+CF_ABS("conffile", CF_STR, cf_config_file, 0, NULL),
+CF_ABS("default_pool_size", CF_INT, cf_default_pool_size, 0, "20"),
 CF_ABS("disable_pqexec", CF_INT, cf_disable_pqexec, CF_NO_RELOAD, "0"),
 CF_ABS("dns_max_ttl", CF_TIME_USEC, cf_dns_max_ttl, 0, "15"),
 CF_ABS("dns_nxdomain_ttl", CF_TIME_USEC, cf_dns_nxdomain_ttl, 0, "15"),
 CF_ABS("dns_zone_check_period", CF_TIME_USEC, cf_dns_zone_check_period, 0, "0"),
-CF_ABS("resolv_conf", CF_STR, cf_resolv_conf, CF_NO_RELOAD, ""),
-
+CF_ABS("idle_transaction_timeout", CF_TIME_USEC, cf_idle_transaction_timeout, 0, "0"),
+CF_ABS("ignore_startup_parameters", CF_STR, cf_ignore_startup_params, 0, ""),
+CF_ABS("job_name", CF_STR, cf_jobname, CF_NO_RELOAD, "pgbouncer"),
+CF_ABS("listen_addr", CF_STR, cf_listen_addr, CF_NO_RELOAD, ""),
+CF_ABS("listen_backlog", CF_INT, cf_listen_backlog, CF_NO_RELOAD, "128"),
+CF_ABS("listen_port", CF_INT, cf_listen_port, CF_NO_RELOAD, "6432"),
+CF_ABS("log_connections", CF_INT, cf_log_connections, 0, "1"),
+CF_ABS("log_disconnections", CF_INT, cf_log_disconnections, 0, "1"),
+CF_ABS("log_pooler_errors", CF_INT, cf_log_pooler_errors, 0, "1"),
+CF_ABS("log_stats", CF_INT, cf_log_stats, 0, "1"),
+CF_ABS("logfile", CF_STR, cf_logfile, 0, ""),
+CF_ABS("max_client_conn", CF_INT, cf_max_client_conn, 0, "100"),
+CF_ABS("max_db_connections", CF_INT, cf_max_db_connections, 0, "0"),
 CF_ABS("max_packet_size", CF_UINT, cf_max_packet_size, 0, "2147483647"),
+CF_ABS("max_user_connections", CF_INT, cf_max_user_connections, 0, "0"),
+CF_ABS("min_pool_size", CF_INT, cf_min_pool_size, 0, "0"),
+CF_ABS("pidfile", CF_STR, cf_pidfile, CF_NO_RELOAD, ""),
 CF_ABS("pkt_buf", CF_INT, cf_sbuf_len, CF_NO_RELOAD, "4096"),
+CF_ABS("pool_mode", CF_LOOKUP(pool_mode_map), cf_pool_mode, 0, "session"),
+CF_ABS("query_timeout", CF_TIME_USEC, cf_query_timeout, 0, "0"),
+CF_ABS("query_wait_timeout", CF_TIME_USEC, cf_query_wait_timeout, 0, "120"),
+CF_ABS("reserve_pool_size", CF_INT, cf_res_pool_size, 0, "0"),
+CF_ABS("reserve_pool_timeout", CF_TIME_USEC, cf_res_pool_timeout, 0, "5"),
+CF_ABS("resolv_conf", CF_STR, cf_resolv_conf, CF_NO_RELOAD, ""),
 CF_ABS("sbuf_loopcnt", CF_INT, cf_sbuf_loopcnt, 0, "5"),
+CF_ABS("server_check_delay", CF_TIME_USEC, cf_server_check_delay, 0, "30"),
+CF_ABS("server_check_query", CF_STR, cf_server_check_query, 0, "select 1"),
+CF_ABS("server_connect_timeout", CF_TIME_USEC, cf_server_connect_timeout, 0, "15"),
+CF_ABS("server_fast_close", CF_INT, cf_server_fast_close, 0, "0"),
+CF_ABS("server_idle_timeout", CF_TIME_USEC, cf_server_idle_timeout, 0, "600"),
+CF_ABS("server_lifetime", CF_TIME_USEC, cf_server_lifetime, 0, "3600"),
+CF_ABS("server_login_retry", CF_TIME_USEC, cf_server_login_retry, 0, "15"),
+CF_ABS("server_reset_query", CF_STR, cf_server_reset_query, 0, "DISCARD ALL"),
+CF_ABS("server_reset_query_always", CF_INT, cf_server_reset_query_always, 0, "0"),
+CF_ABS("server_round_robin", CF_INT, cf_server_round_robin, 0, "0"),
+CF_ABS("server_tls_ca_file", CF_STR, cf_server_tls_ca_file, 0, ""),
+CF_ABS("server_tls_cert_file", CF_STR, cf_server_tls_cert_file, 0, ""),
+CF_ABS("server_tls_ciphers", CF_STR, cf_server_tls_ciphers, 0, "fast"),
+CF_ABS("server_tls_key_file", CF_STR, cf_server_tls_key_file, 0, ""),
+CF_ABS("server_tls_protocols", CF_STR, cf_server_tls_protocols, 0, "secure"),
+CF_ABS("server_tls_sslmode", CF_LOOKUP(sslmode_map), cf_server_tls_sslmode, 0, "disable"),
+#ifdef WIN32
+CF_ABS("service_name", CF_STR, cf_jobname, CF_NO_RELOAD, NULL), /* alias for job_name */
+#endif
+CF_ABS("so_reuseport", CF_INT, cf_so_reuseport, CF_NO_RELOAD, "0"),
+CF_ABS("stats_period", CF_INT, cf_stats_period, 0, "60"),
+CF_ABS("stats_users", CF_STR, cf_stats_users, 0, ""),
+CF_ABS("suspend_timeout", CF_TIME_USEC, cf_suspend_timeout, 0, "10"),
+CF_ABS("syslog", CF_INT, cf_syslog, 0, "0"),
+CF_ABS("syslog_facility", CF_STR, cf_syslog_facility, 0, "daemon"),
+CF_ABS("syslog_ident", CF_STR, cf_syslog_ident, 0, "pgbouncer"),
 CF_ABS("tcp_defer_accept", DEFER_OPS, cf_tcp_defer_accept, 0, NULL),
-CF_ABS("tcp_socket_buffer", CF_INT, cf_tcp_socket_buffer, 0, "0"),
 CF_ABS("tcp_keepalive", CF_INT, cf_tcp_keepalive, 0, "1"),
 CF_ABS("tcp_keepcnt", CF_INT, cf_tcp_keepcnt, 0, "0"),
 CF_ABS("tcp_keepidle", CF_INT, cf_tcp_keepidle, 0, "0"),
 CF_ABS("tcp_keepintvl", CF_INT, cf_tcp_keepintvl, 0, "0"),
+CF_ABS("tcp_socket_buffer", CF_INT, cf_tcp_socket_buffer, 0, "0"),
 CF_ABS("tcp_user_timeout", CF_INT, cf_tcp_user_timeout, 0, "0"),
+CF_ABS("unix_socket_dir", CF_STR, cf_unix_socket_dir, CF_NO_RELOAD, DEFAULT_UNIX_SOCKET_DIR),
+#ifndef WIN32
+CF_ABS("unix_socket_group", CF_STR, cf_unix_socket_group, CF_NO_RELOAD, ""),
+CF_ABS("unix_socket_mode", CF_INT, cf_unix_socket_mode, CF_NO_RELOAD, "0777"),
+#endif
+#ifndef WIN32
+CF_ABS("user", CF_STR, cf_username, CF_NO_RELOAD, NULL),
+#endif
 CF_ABS("verbose", CF_INT, cf_verbose, 0, NULL),
 CF_ABS("admin_users", CF_STR, cf_admin_users, 0, ""),
 CF_ABS("stats_users", CF_STR, cf_stats_users, 0, ""),
@@ -331,7 +359,7 @@ bool set_config_param(const char *key, const char *val)
 	return cf_set(&main_config, "pgbouncer", key, val);
 }
 
-void config_for_each(void (*param_cb)(void *arg, const char *name, const char *val, bool reloadable),
+void config_for_each(void (*param_cb)(void *arg, const char *name, const char *val, const char *defval, bool reloadable),
 		     void *arg)
 {
 	const struct CfKey *k = bouncer_params;
@@ -343,7 +371,7 @@ void config_for_each(void (*param_cb)(void *arg, const char *name, const char *v
 	for (; k->key_name; k++) {
 		val = cf_get(&main_config, "pgbouncer", k->key_name, buf, sizeof(buf));
 		reloadable = (k->flags & ro) == 0;
-		param_cb(arg, k->key_name, val, reloadable);
+		param_cb(arg, k->key_name, val, k->def_value, reloadable);
 	}
 }
 
@@ -414,7 +442,7 @@ void load_config(void)
 		}
 	}
 
-	/* reset pool_size, kill dbs */
+	/* kill dbs */
 	config_postprocess();
 
 	/* reopen logfile */
@@ -494,6 +522,8 @@ static void handle_sighup(int sock, short flags, void *arg)
 	log_info("got SIGHUP, re-reading config");
 	sd_notify(0, "RELOADING=1");
 	load_config();
+	if (!sbuf_tls_setup())
+		log_error("TLS configuration could not be reloaded, keeping old configuration");
 	sd_notify(0, "READY=1");
 }
 #endif
@@ -691,9 +721,9 @@ static void check_limits(void)
 	statlist_for_each(item, &database_list) {
 		db = container_of(item, PgDatabase, head);
 		if (db->forced_user)
-			fd_count += db->pool_size;
+			fd_count += (db->pool_size >= 0 ? db->pool_size : cf_default_pool_size);
 		else
-			fd_count += db->pool_size * total_users;
+			fd_count += (db->pool_size >= 0 ? db->pool_size : cf_default_pool_size) * total_users;
 	}
 
 	log_info("kernel file descriptor limit: %d (hard: %d); max_client_conn: %d, max expected fd use: %d",
@@ -707,7 +737,7 @@ static bool check_old_process_unix(void)
 	int domain = AF_UNIX;
 	int res, fd;
 
-	if (!cf_unix_socket_dir || !*cf_unix_socket_dir)
+	if (!cf_unix_socket_dir || !*cf_unix_socket_dir || sd_listen_fds(0) > 0)
 		return false;
 
 	memset(&sa_un, 0, len);
@@ -757,6 +787,17 @@ static void takeover_part1(void)
 	if (!cf_unix_socket_dir || !*cf_unix_socket_dir)
 		die("cannot reboot if unix dir not configured");
 
+	/*
+	 * Takeover with abstract Unix socket doesn't work because the
+	 * new process can't unlink the socket used by the old process
+	 * and put its own in place (see create_unix_socket()).
+	 */
+	if (cf_unix_socket_dir[0] == '@')
+		die("cannot reboot with abstract Unix socket");
+
+	if (sd_listen_fds(0) > 0)
+		die("cannot reboot under service manager");
+
 	takeover_init();
 	while (cf_reboot)
 		main_loop_once();
@@ -782,6 +823,7 @@ static void xfree(char **ptr_p)
 	}
 }
 
+_UNUSED
 static void cleanup(void)
 {
 	adns_free_context(adns);
@@ -869,6 +911,9 @@ int main(int argc, char *argv[])
 			       event_get_version(),
 			       adns_get_backend(),
 			       tls_backend_version());
+#ifdef USE_SYSTEMD
+			printf("systemd: yes\n");
+#endif
 			return 0;
 		case 'd':
 			cf_daemon = 1;
@@ -901,7 +946,8 @@ int main(int argc, char *argv[])
 	init_caches();
 	logging_prefix_cb = log_socket_prefix;
 
-	sbuf_tls_setup();
+	if (!sbuf_tls_setup())
+		die("TLS setup failed");
 
 	/* prefer cmdline over config for username */
 	if (arg_username) {
@@ -938,6 +984,11 @@ int main(int argc, char *argv[])
 	if (cf_daemon)
 		go_daemon();
 
+#ifndef USE_SYSTEMD
+	if (getenv("NOTIFY_SOCKET"))
+		log_warning("apparently running under systemd with notify socket, but systemd support was not built");
+#endif
+
 	/* need to do that after loading config; also do after
 	 * go_daemon() so that output goes to log file */
 	check_limits();
@@ -972,7 +1023,9 @@ int main(int argc, char *argv[])
 		main_loop_once();
 
 	/* not useful for production loads */
-	if (0) cleanup();
+#ifdef CASSERT
+	cleanup();
+#endif
 
 	return 0;
 }

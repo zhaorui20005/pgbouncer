@@ -26,6 +26,7 @@
 /*
  * PostgreSQL type OIDs for result sets
  */
+#define BYTEAOID 17
 #define INT8OID 20
 #define INT4OID 23
 #define TEXTOID 25
@@ -68,11 +69,11 @@ PktBuf *pktbuf_dynamic(int start_len)
 
 void pktbuf_reset(struct PktBuf *pkt)
 {
-	pkt->failed = 0;
+	pkt->failed = false;
 	pkt->write_pos = 0;
 	pkt->pktlen_pos = 0;
 	pkt->send_pos = 0;
-	pkt->sending = 0;
+	pkt->sending = false;
 }
 
 void pktbuf_static(PktBuf *buf, uint8_t *data, int len)
@@ -80,7 +81,7 @@ void pktbuf_static(PktBuf *buf, uint8_t *data, int len)
 	memset(buf, 0, sizeof(*buf));
 	buf->buf = data;
 	buf->buf_len = len;
-	buf->fixed_buf = 1;
+	buf->fixed_buf = true;
 }
 
 static PktBuf *temp_pktbuf;
@@ -105,7 +106,7 @@ bool pktbuf_send_immediate(PktBuf *buf, PgSocket *sk)
 {
 	uint8_t *pos = buf->buf + buf->send_pos;
 	int amount = buf->write_pos - buf->send_pos;
-	int res;
+	ssize_t res;
 
 	if (buf->failed)
 		return false;
@@ -159,9 +160,9 @@ bool pktbuf_send_queued(PktBuf *buf, PgSocket *sk)
 
 	if (buf->failed) {
 		pktbuf_free(buf);
-		return send_pooler_error(sk, true, "result prepare failed");
+		return send_pooler_error(sk, true, false, "result prepare failed");
 	} else {
-		buf->sending = 1;
+		buf->sending = true;
 		buf->queued_dst = sk;
 		pktbuf_send_func(sk->sbuf.sock, EV_WRITE, buf);
 		return true;
@@ -181,7 +182,7 @@ static void make_room(PktBuf *buf, int len)
 		return;
 
 	if (buf->fixed_buf) {
-		buf->failed = 1;
+		buf->failed = true;
 		return;
 	}
 
@@ -192,7 +193,7 @@ static void make_room(PktBuf *buf, int len)
 		  buf, len, newlen);
 	ptr = realloc(buf->buf, newlen);
 	if (!ptr) {
-		buf->failed = 1;
+		buf->failed = true;
 	} else {
 		buf->buf = ptr;
 		buf->buf_len = newlen;
@@ -350,7 +351,8 @@ void pktbuf_write_generic(PktBuf *buf, int type, const char *pktdesc, ...)
  * tupdesc keys:
  * 'i' - int4
  * 'q' - int8
- * 's' - string
+ * 's' - string to text
+ * 'b' - bytes to bytea
  * 'N' - uint64_t to numeric
  * 'T' - usec_t to date
  */
@@ -376,6 +378,9 @@ void pktbuf_write_RowDescription(PktBuf *buf, const char *tupdesc, ...)
 		pktbuf_put_uint16(buf, 0);
 		if (tupdesc[i] == 's') {
 			pktbuf_put_uint32(buf, TEXTOID);
+			pktbuf_put_uint16(buf, -1);
+		} else if (tupdesc[i] == 'b') {
+			pktbuf_put_uint32(buf, BYTEAOID);
 			pktbuf_put_uint16(buf, -1);
 		} else if (tupdesc[i] == 'i') {
 			pktbuf_put_uint32(buf, INT4OID);
@@ -407,22 +412,24 @@ void pktbuf_write_RowDescription(PktBuf *buf, const char *tupdesc, ...)
  * tupdesc keys:
  * 'i' - int4
  * 'q' - int8
- * 's' - string
+ * 's' - string to text
+ * 'b' - bytes to bytea
  * 'N' - uint64_t to numeric
  * 'T' - usec_t to date
  */
 void pktbuf_write_DataRow(PktBuf *buf, const char *tupdesc, ...)
 {
-	char tmp[32];
-	const char *val = NULL;
-	int i, len, ncol = strlen(tupdesc);
+	int ncol = strlen(tupdesc);
 	va_list ap;
 
 	pktbuf_start_packet(buf, 'D');
 	pktbuf_put_uint16(buf, ncol);
 
 	va_start(ap, tupdesc);
-	for (i = 0; i < ncol; i++) {
+	for (int i = 0; i < ncol; i++) {
+		char tmp[100];	/* XXX good enough in practice */
+		const char *val = NULL;
+
 		if (tupdesc[i] == 'i') {
 			snprintf(tmp, sizeof(tmp), "%d", va_arg(ap, int));
 			val = tmp;
@@ -431,6 +438,23 @@ void pktbuf_write_DataRow(PktBuf *buf, const char *tupdesc, ...)
 			val = tmp;
 		} else if (tupdesc[i] == 's') {
 			val = va_arg(ap, char *);
+		} else if (tupdesc[i] == 'b') {
+			int blen = va_arg(ap, int);
+			if (blen >= 0) {
+				uint8_t *bval = va_arg(ap, uint8_t *);
+				size_t required = 2 + blen * 2 + 1;
+
+				if (required > sizeof(tmp))
+					fatal("byte array too long (%zu > %zu)", required, sizeof(tmp));
+				strcpy(tmp, "\\x");
+				for (int j = 0; j < blen; j++)
+					sprintf(tmp + (2 + j * 2), "%02x", bval[j]);
+				val = tmp;
+			}
+			else {
+				(void) va_arg(ap, uint8_t *);
+				val = NULL;
+			}
 		} else if (tupdesc[i] == 'T') {
 			usec_t time = va_arg(ap, usec_t);
 			val = format_time_s(time, tmp, sizeof(tmp));
@@ -439,7 +463,7 @@ void pktbuf_write_DataRow(PktBuf *buf, const char *tupdesc, ...)
 		}
 
 		if (val) {
-			len = strlen(val);
+			int len = strlen(val);
 			pktbuf_put_uint32(buf, len);
 			pktbuf_put_bytes(buf, val, len);
 		} else {
